@@ -1,0 +1,193 @@
+# verta - enterprise secure mail server
+#
+# Main configuration. Reload the running daemon with:
+#   verta reload        (or: systemctl reload verta)
+#
+# SECURE BY DEFAULT: verta is never an open relay. Port 25 only
+# accepts mail for the domains configured below; relaying requires
+# authentication on 465/587 (from milestone M2).
+
+server:
+  # Public identity: SMTP banner, Received headers, default TLS
+  # certificate. Never an internal or container hostname.
+  hostname: mail.example.com
+  # Maximum concurrent protocol sessions.
+  workers: 50
+
+# Empty address disables a listener. The mail access protocols
+# (submission, IMAP, POP3) refuse to start without a TLS certificate:
+# credentials must never cross a plaintext channel.
+listeners:
+  smtp:
+    address: ":25"
+  smtps:
+    address: ":465"
+  submission:
+    address: ":587"
+  imap:
+    address: ":143"
+  imaps:
+    address: ":993"
+  pop3:
+    address: ":110"
+  pop3s:
+    address: ":995"
+
+tls:
+  # Let's Encrypt live directory. Certificates are WILDCARDS issued
+  # on the configured domain: <cert_root>/<domain>/fullchain.pem and
+  # privkey.pem. There is never a per-subdomain directory:
+  #   mail.example.com      -> /etc/letsencrypt/live/example.com/
+  #   mail.studenti.ente.it -> /etc/letsencrypt/live/studenti.ente.it/
+  # SNI resolves the client name to the longest configured domain.
+  cert_root: /etc/letsencrypt/live
+  # TLS floor: "1.2" or "1.3". SSLv3/TLS1.0/TLS1.1 are never offered.
+  min_version: "1.2"
+  # Warn this many days before a certificate expires.
+  expiry_warn_days: 14
+
+smtp:
+  # Maximum message size in bytes (advertised via EHLO SIZE).
+  max_size: 26214400
+  # Maximum recipients per message.
+  max_recipients: 100
+
+# Inbound mail authentication on port 25: SPF (RFC 7208), DKIM
+# verification (RFC 6376), DMARC (RFC 7489). Every message gets an
+# Authentication-Results header. With enforce: true, DMARC p=reject
+# answers 550 and p=quarantine delivers into the Spam folder; with
+# enforce: false results are only annotated and logged.
+mail_auth:
+  enabled: true
+  enforce: true
+
+# Brute force protection for SMTP AUTH: progressive delays, then a
+# temporary lockout of the user and the source IP.
+auth:
+  max_failures: 10
+  lockout_minutes: 15
+
+# Outbound queue (submission relay): exponential retry on 4xx,
+# immediate RFC 3464 bounce on 5xx.
+queue:
+  dir: /var/lib/verta/queue
+  max_attempts: 10
+
+# DKIM signing keys, one per domain: <dir>/<domain>/<selector>.pem.
+# Create them with `verta generate-dkim <domain>`.
+dkim:
+  dir: /var/lib/verta/dkim
+
+# Inbound spam scoring: Bayesian classifier (trained on your own
+# corpus) plus header, link and attachment heuristics. The thresholds
+# must escalate: tag <= quarantine <= reject.
+antispam:
+  enabled: true
+  bayes_file: /var/lib/verta/bayes
+  # Stamp X-Spam-Status: Yes at or above this score.
+  tag_score: 5
+  # Deliver into the Spam folder at or above.
+  quarantine_score: 10
+  # Refuse the message at DATA at or above.
+  reject_score: 20
+  # Refuse executable attachments outright, whatever the score.
+  reject_executables: true
+
+# ClamAV over its socket. A virus is never delivered, not even
+# quarantined.
+antivirus:
+  enabled: false
+  socket: /var/run/clamav/clamd.ctl
+  timeout_seconds: 30
+  # Refuse (4xx) when clamd is unreachable instead of delivering
+  # unscanned mail.
+  reject_on_error: false
+
+# DNS blacklists: DNSBL for connecting IPs, URIBL for links in the
+# body. Answers are cached to stay within the list operators' limits.
+blacklist:
+  enabled: true
+  dnsbl:
+    - zen.spamhaus.org
+    - b.barracudacentral.org
+    - dnsbl.sorbs.net
+    - dnsbl-1.uceprotect.net
+  uribl:
+    - dbl.spamhaus.org
+    - multi.uribl.com
+  # Refuse a connection from a listed IP outright. Off by default:
+  # start by scoring, turn this on once you trust your lists.
+  reject_listed: false
+  cache_minutes: 60
+
+# Outbound sender reputation and the warm-up ramp for new domains.
+# Scores run 0..100 and decay toward 50 over time.
+reputation:
+  enabled: true
+  file: /var/lib/verta/reputation.json
+  warmup:
+    enabled: true
+    day1: 100
+    day7: 2000
+    full_per_day: 50000
+
+# LXD/LXC deployment. From the outside verta must look installed on
+# the metal: the banner and every trace header carry server.hostname
+# and public_ip, never the container name or an address from the
+# internal bridge. Verify with: verta container-check
+container:
+  enabled: false
+  type: lxd
+  # The address the world reaches this server on. It replaces
+  # internal addresses in outgoing trace headers.
+  public_ip: "203.0.113.10"
+  # The container's address on the bridge.
+  internal_ip: "10.1.0.20"
+
+# Flood protection (token bucket, burst = rate). Enabled by default;
+# disable explicitly with enabled: false.
+rate_limit:
+  # Per source IP, per minute.
+  inbound:
+    ip:
+      connections_per_minute: 30
+      messages_per_minute: 100
+      recipients_per_minute: 500
+  # Per authenticated user, per hour (compromised account
+  # containment).
+  outbound:
+    user:
+      messages_per_hour: 500
+      recipients_per_hour: 1000
+
+# Hosted domains live in one file per domain under this directory,
+# never in this file: adding a customer, changing a mailbox password
+# or handing a domain to a provisioning script must not mean editing
+# the server configuration, and a syntax error in one customer's file
+# must not take the whole server down.
+#
+#   /etc/verta/domains/example.com.yaml
+#   /etc/verta/domains/studenti.ente.it.yaml
+#
+# The file name is the domain name. See example.com.yaml.example.
+#
+# Left unset it resolves to a "domains" directory beside this file,
+# which is /etc/verta/domains for an installed server and keeps a
+# staging copy of the configuration self-contained. Set it only to
+# put the domains somewhere else entirely:
+#
+#   domains_dir: /srv/verta/tenants
+
+# Administrative HTTPS API. Static API keys only (no JWT):
+#   Authorization: Bearer <key>      (or X-API-Key: <key>)
+# Refuses to start when enabled without keys, and never runs without
+# TLS. /health is the only unauthenticated endpoint.
+#   GET  /api/v1/status  /domains  /users  /reputation
+#   POST /api/v1/reload
+api:
+  enabled: false
+  address: ":8443"
+  keys: []
+
+log:
+  dir: /var/log/verta

@@ -1,0 +1,173 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Allow running the suite by hand, e.g. before cutting a release.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux is the deployment target; Windows is where development
+        # happens, and the platform-specific files (Maildir flag
+        # separator, signal handling) only diverge there — so both are
+        # worth keeping green.
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        shell: bash
+        run: |
+          unformatted=$(gofmt -s -l .)
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt -s formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # The race detector needs a C toolchain, which is reliable on the
+      # Linux runners; Windows runs the plain suite.
+      - name: go test (race)
+        if: runner.os == 'Linux'
+        run: go test ./... -race -count=1
+
+      - name: go test
+        if: runner.os != 'Linux'
+        run: go test ./... -count=1
+
+  build:
+    name: cross-compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The release ships static binaries for both architectures, so a
+      # build break on either must fail the branch, not the release.
+      - name: build linux/amd64 and linux/arm64
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/verta-amd64 ./cmd/verta
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /tmp/verta-arm64 ./cmd/verta
+          file /tmp/verta-amd64 /tmp/verta-arm64
+
+      # A binary that cannot validate its own shipped configuration is
+      # broken in a way the unit tests do not catch.
+      - name: smoke test the built binary
+        run: |
+          /tmp/verta-amd64 --version
+          /tmp/verta-amd64 --check-config \
+            --config internal/bootstrap/skel/etc/verta/config.yaml
+          # audit is expected to report findings here (a checked-out
+          # config has repository permissions, not production ones);
+          # what matters is that it runs to completion.
+          /tmp/verta-amd64 --audit \
+            --config internal/bootstrap/skel/etc/verta/config.yaml \
+            || test $? -eq 1
+
+  # The documented installation path, executed exactly as an operator
+  # would: unpack a bundle, provision the system, then remove it. This
+  # is the one flow that touches /usr/sbin, /etc and systemd, so it can
+  # only be tested on a throwaway machine — which is what a runner is.
+  install:
+    name: install and purge
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: build a bundle the way the release does
+        run: |
+          mkdir -p bundle
+          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=ci" \
+            -o bundle/verta ./cmd/verta
+          cp internal/bootstrap/verta.service bundle/
+
+      - name: init refuses without root
+        working-directory: bundle
+        run: |
+          if ./verta --init; then
+            echo "init must not provision the system as an unprivileged user"
+            exit 1
+          fi
+
+      - name: sudo ./verta --init
+        working-directory: bundle
+        run: sudo ./verta --init
+
+      - name: the system is provisioned
+        run: |
+          set -x
+          test -x /usr/sbin/verta
+          # The layout is root-only (0750), so inspecting it needs
+          # sudo — which is itself part of what this asserts.
+          sudo test -f /etc/verta/config.yaml
+          sudo test -d /etc/verta/domains
+          sudo test -f /etc/verta/domains/example.com.yaml.example
+          sudo test -f /etc/systemd/system/verta.service
+          sudo test -d /var/lib/verta/queue
+          sudo test -d /var/lib/verta/dkim
+          sudo test -d /var/log/verta
+          # The installed binary is the one that was just built.
+          [ "$(/usr/sbin/verta --version)" = "verta ci" ]
+          # An unprivileged user must not be able to reach the
+          # configuration or the DKIM keys at all.
+          if cat /etc/verta/config.yaml 2>/dev/null; then
+            echo "the configuration is readable by an unprivileged user"
+            exit 1
+          fi
+          [ "$(sudo stat -c %a /etc/verta)" = "750" ]
+          [ "$(sudo stat -c %a /var/lib/verta/dkim)" = "700" ]
+          [ "$(sudo stat -c %a /etc/verta/config.yaml)" = "640" ]
+
+      - name: the provisioned configuration is usable
+        run: |
+          sudo cp /etc/verta/domains/example.com.yaml.example \
+                  /etc/verta/domains/example.com.yaml
+          sudo verta --check-config
+          sudo verta --generate-dkim example.com
+          sudo verta --audit || test $? -eq 1
+
+      - name: init is idempotent
+        working-directory: bundle
+        run: |
+          sudo ./verta --init | tee out.txt
+          grep -q "kept /etc/verta/config.yaml" out.txt
+          # The domain added above must survive a second init.
+          sudo test -f /etc/verta/domains/example.com.yaml
+
+      - name: sudo verta --purge --yes
+        run: |
+          sudo verta --purge --yes
+          for p in /etc/verta /var/lib/verta /var/log/verta \
+                   /etc/systemd/system/verta.service /usr/sbin/verta; do
+            if [ -e "$p" ]; then
+              echo "purge left $p behind"
+              exit 1
+            fi
+          done

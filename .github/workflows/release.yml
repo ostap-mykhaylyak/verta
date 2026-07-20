@@ -1,0 +1,145 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Lets a release be re-cut by hand if the artifacts need rebuilding.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "existing tag to build a release for (e.g. v1.0.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          # `git describe` needs the full history to name the version.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # A tag must never ship code that does not pass its own tests.
+      - name: verify
+        run: |
+          test -z "$(gofmt -s -l .)" || { gofmt -s -l .; exit 1; }
+          go vet ./...
+          go test ./... -race -count=1
+
+      - name: resolve version
+        id: version
+        run: |
+          version="${{ inputs.tag }}"
+          if [ -z "$version" ]; then
+            version="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "building $version"
+
+      # One self-contained tarball per architecture. The binary
+      # provisions the whole system itself, so the bundle only needs
+      # the binary, the unit and the documentation: unpack, run
+      # `sudo ./verta --init`, done.
+      - name: build and package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            bundle="verta-${VERSION}-linux-${arch}"
+            mkdir -p "build/$bundle"
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build \
+              -trimpath \
+              -ldflags "-s -w -X main.version=${VERSION}" \
+              -o "build/$bundle/verta" ./cmd/verta
+            cp internal/bootstrap/verta.service "build/$bundle/"
+            cp README.md LICENSE "build/$bundle/"
+            tar -czf "dist/$bundle.tar.gz" -C build "$bundle"
+          done
+          cd dist && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
+
+      # A tarball that unpacks into a binary which cannot even report
+      # its own version is not a release.
+      - name: verify the packaged tarball
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cd $(mktemp -d)
+          tar xzf "${GITHUB_WORKSPACE}/dist/verta-${VERSION}-linux-amd64.tar.gz"
+          cd verta-*
+          ls -la
+          ./verta --version
+          # The dash convention is enforced: a service verb rejects a
+          # leading --, and everything else requires one.
+          ./verta --start 2>&1 | grep -q "no leading --"
+          ./verta version 2>&1 | grep -q "leading --"
+          # init must refuse cleanly as a non-root user rather than
+          # leaving a half-provisioned system behind.
+          ! ./verta --init 2>&1 | tee /dev/stderr | grep -q "must run as root" && exit 1 || true
+
+      - name: create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          notes=$(mktemp)
+          {
+            echo "## verta ${VERSION}"
+            echo
+            echo "Static, dependency-free bundles for Linux (amd64, arm64)."
+            echo
+            echo '```sh'
+            echo "curl -LO https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}/verta-${VERSION}-linux-amd64.tar.gz"
+            echo "tar xzf verta-*.tar.gz && cd verta-*"
+            echo "sudo ./verta --init"
+            echo "sudo systemctl daemon-reload"
+            echo "sudo systemctl enable --now verta"
+            echo "verta --status"
+            echo '```'
+            echo
+            echo "\`init\` installs the binary, provisions /etc/verta with its"
+            echo "domains directory, /var/lib/verta and /var/log/verta, and"
+            echo "writes the systemd unit. It never overwrites an existing"
+            echo "configuration, so it doubles as the upgrade path."
+            echo
+            echo "Verify the download against \`SHA256SUMS\`."
+            echo
+
+            # The tag annotation is where release-specific context gets
+            # written — breaking changes, migration steps. Losing it
+            # here would mean an operator upgrading never sees it.
+            annotation=$(git tag -l --format='%(contents:body)' "${VERSION}")
+            if [ -n "$(echo "$annotation" | tr -d '[:space:]')" ]; then
+              echo "$annotation"
+              echo
+            fi
+
+            echo "### Changes"
+            echo
+            # Everything since the previous tag; falls back to the
+            # whole history for the first release.
+            previous=$(git describe --tags --abbrev=0 "${VERSION}^" 2>/dev/null || true)
+            if [ -n "$previous" ]; then
+              echo "Since ${previous}:"
+              echo
+              git log --no-merges --pretty='- %s' "${previous}..${VERSION}"
+            else
+              git log --no-merges --pretty='- %s' "${VERSION}"
+            fi
+          } > "$notes"
+          cat "$notes"
+
+          gh release create "${VERSION}" \
+            --title "verta ${VERSION}" \
+            --notes-file "$notes" \
+            --verify-tag \
+            dist/*
