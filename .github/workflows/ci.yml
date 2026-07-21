@@ -171,3 +171,75 @@ jobs:
               exit 1
             fi
           done
+
+  # Reproduces the field bug: a listener skipped at startup for lack of
+  # a certificate must come up on `verta reload` once the certificate is
+  # installed, without a full restart. Signals only work on Linux, so
+  # this cannot run in the Windows unit suite.
+  reload:
+    name: reload starts TLS listeners
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: build
+        run: CGO_ENABLED=0 go build -trimpath -o /tmp/verta ./cmd/verta
+
+      - name: a certificate installed after start comes up on reload
+        run: |
+          set -euo pipefail
+          root=$(mktemp -d)
+          mkdir -p "$root/domains" "$root/live"
+
+          # Flow-style YAML keeps every top-level key at column 0, so
+          # the heredoc indentation cannot corrupt it.
+          {
+            echo "server: {hostname: mail.example.com}"
+            echo "listeners: {smtp: {address: \"127.0.0.1:12525\"}, submission: {address: \"127.0.0.1:12587\"}, imaps: {address: \"127.0.0.1:12993\"}, smtps: {address: \"\"}, imap: {address: \"\"}, pop3: {address: \"\"}, pop3s: {address: \"\"}}"
+            echo "tls: {cert_root: \"$root/live\"}"
+            echo "queue: {dir: \"$root/queue\"}"
+            echo "dkim: {dir: \"$root/dkim\"}"
+            echo "mail_auth: {enabled: false}"
+            echo "blacklist: {enabled: false}"
+            echo "log: {dir: \"$root/logs\"}"
+          } > "$root/config.yaml"
+          {
+            echo "name: example.com"
+            echo "users: [{email: admin@example.com, maildir: \"$root/mail/admin\"}]"
+          } > "$root/domains/example.com.yaml"
+
+          sock="$root/v.sock"; pid="$root/v.pid"
+          /tmp/verta start --config "$root/config.yaml" --pidfile "$pid" --socket "$sock" &
+          for i in $(seq 1 50); do [ -S "$sock" ] && break; sleep 0.1; done
+
+          # No certificate yet: only the plaintext inbound listener runs.
+          before=$(/tmp/verta --status --socket "$sock" --json | jq -r '.listeners[].protocol' | sort | paste -sd, -)
+          echo "before reload: $before"
+          [ "$before" = "smtp" ] || { echo "expected only smtp before the certificate, got: $before"; exit 1; }
+
+          # Install the certificate where verta looks for it, then reload.
+          mkdir -p "$root/live/example.com"
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+            -keyout "$root/live/example.com/privkey.pem" \
+            -out "$root/live/example.com/fullchain.pem" \
+            -days 90 -subj "/CN=example.com" \
+            -addext "subjectAltName=DNS:example.com,DNS:*.example.com" 2>/dev/null
+          /tmp/verta reload --pidfile "$pid"
+          sleep 1
+
+          # The mail-access listeners must now be up WITHOUT a restart.
+          after=$(/tmp/verta --status --socket "$sock" --json | jq -r '.listeners[].protocol' | sort | paste -sd, -)
+          echo "after reload:  $after"
+          echo "$after" | grep -q submission || { echo "submission did not come up on reload"; exit 1; }
+          echo "$after" | grep -q imaps || { echo "imaps did not come up on reload"; exit 1; }
+
+          # And it is genuinely listening, not just reported.
+          openssl s_client -connect 127.0.0.1:12993 -servername mail.example.com </dev/null 2>/dev/null | grep -q "CN" \
+            && echo "imaps accepts TLS"
+
+          /tmp/verta stop --pidfile "$pid" || true

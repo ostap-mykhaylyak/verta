@@ -246,6 +246,12 @@ a crash: the domains whose certificates load keep working. The
 protocols that carry credentials — submission, IMAP, POP3 and the API
 — refuse to start without one.
 
+If verta starts before the certificate is in place — a common order
+on a first install — those listeners are skipped, and **`verta reload`
+brings them up as soon as the certificate is present**, no restart
+needed. `verta --status` reports the listeners actually bound, so you
+can see exactly which ones came up.
+
 ---
 
 ## SMTP

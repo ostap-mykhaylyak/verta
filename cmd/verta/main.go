@@ -31,6 +31,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -654,54 +655,55 @@ func runDaemon(cfgPath, pidfile, sockPath string) (err error) {
 		},
 	}
 
-	// --- listeners: 25 inbound, 587 submission, 465 submission TLS ---
+	// --- listeners ---
+	// TLS-requiring listeners (submission, IMAP, POP3, the API) are only
+	// bound once a certificate is loaded: verta never exposes
+	// authentication in the clear. Such a listener may be skipped at
+	// startup and become possible later — when the operator installs the
+	// certificate and reloads, or when certbot renews it. Binding is
+	// therefore idempotent and re-run on every reload and certificate
+	// refresh, not only at startup; before this, a listener skipped at
+	// startup stayed down until a full restart.
 	limits := newLimits(cfg)
-	specs := []struct {
-		name     string
-		addr     string
-		mode     smtp.Mode
-		implicit bool
-	}{
-		{"smtp", cfg.Listeners.SMTP.Address, smtp.ModeInbound, false},
-		{"submission", cfg.Listeners.Submission.Address, smtp.ModeSubmission, false},
-		{"smtps", cfg.Listeners.SMTPS.Address, smtp.ModeSubmission, true},
-	}
+
 	type running struct {
 		srv      *smtp.Server
 		mode     smtp.Mode
 		implicit bool
 	}
-	var servers []running
-	for _, sp := range specs {
-		if sp.addr == "" {
-			continue
-		}
-		if sp.mode == smtp.ModeSubmission && len(store.Loaded()) == 0 {
-			// Secure by default: submission without TLS would expose
-			// credentials, better no listener than a plaintext one.
-			logs.Service.Warn("submission listener disabled: no TLS certificate loaded",
-				"protocol", sp.name, "address", sp.addr)
-			continue
-		}
-		ln, err := net.Listen("tcp", sp.addr)
-		if err != nil {
-			return fmt.Errorf("%s listener %s: %w", sp.name, sp.addr, err)
-		}
-		if sp.implicit {
-			ln = stdtls.NewListener(ln, store.Config())
-		}
-		srv := smtp.New(smtpSettings(cfg, store, sp.mode, sp.implicit, limits, counters), backend, cfg.Server.Workers, logs.Service)
-		go func(name string) {
-			if err := srv.Serve(ln); err != nil {
-				logs.Service.Error("smtp server failed", "protocol", name, "error", err.Error())
-			}
-		}(sp.name)
-		servers = append(servers, running{srv, sp.mode, sp.implicit})
-		logs.Service.Info("listening", "protocol", sp.name, "address", sp.addr, "mode", int(sp.mode))
+	type imapRunning struct {
+		srv      *imap.Server
+		implicit bool
 	}
-	// --- mail access: IMAP (143/993) and POP3 (110/995) ---
-	// Access protocols authenticate the same accounts as submission
-	// and resolve the mailbox through the same storage rules.
+	type pop3Running struct {
+		srv      *pop3.Server
+		implicit bool
+	}
+	var (
+		servers     []running
+		imapServers []imapRunning
+		pop3Servers []pop3Running
+		apiSrv      *api.Server
+	)
+
+	// bound records which named listeners are up (name -> address). It is
+	// touched only on the daemon's main goroutine: startup, then the
+	// reload/refresh cases of the select loop. liveListeners publishes it
+	// to the status goroutine without a lock.
+	bound := map[string]string{}
+	var liveListeners atomic.Pointer[[]kstatus.Listener]
+	publishListeners := func() {
+		var out []kstatus.Listener
+		for _, n := range []string{"smtp", "submission", "smtps", "imap", "imaps", "pop3", "pop3s", "api"} {
+			if addr, ok := bound[n]; ok {
+				out = append(out, kstatus.Listener{Protocol: n, Address: addr})
+			}
+		}
+		liveListeners.Store(&out)
+	}
+
+	// Mail access (IMAP and POP3) authenticates the same accounts as
+	// submission and resolves the mailbox through the same storage rules.
 	accessAuth := func(email, password, ip string) (string, error) {
 		if err := authr.Verify(email, password, ip); err != nil {
 			return "", err
@@ -713,118 +715,161 @@ func runDaemon(cfgPath, pidfile, sockPath string) (err error) {
 		return mb.Dir, nil
 	}
 
-	var imapServers []struct {
-		srv      *imap.Server
-		implicit bool
-	}
-	for _, sp := range []struct {
-		name     string
-		addr     string
-		implicit bool
-	}{
-		{"imap", cfg.Listeners.IMAP.Address, false},
-		{"imaps", cfg.Listeners.IMAPS.Address, true},
-	} {
-		if sp.addr == "" {
-			continue
-		}
-		if len(store.Loaded()) == 0 {
-			// Same rule as submission: no certificate, no mail access
-			// listener — credentials must never cross in the clear.
-			logs.Service.Warn("imap listener disabled: no TLS certificate loaded",
-				"protocol", sp.name, "address", sp.addr)
-			continue
-		}
-		ln, err := net.Listen("tcp", sp.addr)
-		if err != nil {
-			return fmt.Errorf("%s listener %s: %w", sp.name, sp.addr, err)
-		}
-		if sp.implicit {
-			ln = stdtls.NewListener(ln, store.Config())
-		}
-		srv := imap.New(imapSettings(cfg, store, sp.implicit),
-			imap.Backend{Authenticate: accessAuth}, cfg.Server.Workers, logs.Service)
-		go func(name string) {
-			if err := srv.Serve(ln); err != nil {
-				logs.Service.Error("imap server failed", "protocol", name, "error", err.Error())
-			}
-		}(sp.name)
-		imapServers = append(imapServers, struct {
-			srv      *imap.Server
-			implicit bool
-		}{srv, sp.implicit})
-		logs.Service.Info("listening", "protocol", sp.name, "address", sp.addr)
-	}
+	// ensureListeners binds every configured listener that should be up
+	// but is not yet, leaving already-bound ones untouched. Bind errors
+	// are returned so startup can treat them as fatal (a crash loop is
+	// visible) while a reload only logs them.
+	ensureListeners := func(cfg *config.Config, lim limitSet) []error {
+		var errs []error
 
-	var pop3Servers []struct {
-		srv      *pop3.Server
-		implicit bool
-	}
-	for _, sp := range []struct {
-		name     string
-		addr     string
-		implicit bool
-	}{
-		{"pop3", cfg.Listeners.POP3.Address, false},
-		{"pop3s", cfg.Listeners.POP3S.Address, true},
-	} {
-		if sp.addr == "" {
-			continue
-		}
-		if len(store.Loaded()) == 0 {
-			logs.Service.Warn("pop3 listener disabled: no TLS certificate loaded",
-				"protocol", sp.name, "address", sp.addr)
-			continue
-		}
-		ln, err := net.Listen("tcp", sp.addr)
-		if err != nil {
-			return fmt.Errorf("%s listener %s: %w", sp.name, sp.addr, err)
-		}
-		if sp.implicit {
-			ln = stdtls.NewListener(ln, store.Config())
-		}
-		srv := pop3.New(pop3Settings(cfg, store, sp.implicit),
-			pop3.Backend{Authenticate: accessAuth}, cfg.Server.Workers, logs.Service)
-		go func(name string) {
-			if err := srv.Serve(ln); err != nil {
-				logs.Service.Error("pop3 server failed", "protocol", name, "error", err.Error())
-			}
-		}(sp.name)
-		pop3Servers = append(pop3Servers, struct {
-			srv      *pop3.Server
+		for _, sp := range []struct {
+			name     string
+			addr     string
+			mode     smtp.Mode
 			implicit bool
-		}{srv, sp.implicit})
-		logs.Service.Info("listening", "protocol", sp.name, "address", sp.addr)
-	}
-
-	// --- administrative API (HTTPS, static API keys only) ---
-	var apiSrv *api.Server
-	if cfg.API.Enabled {
-		if len(store.Loaded()) == 0 {
-			// The API carries credentials and mutates state: it never
-			// runs unencrypted.
-			logs.Service.Warn("api disabled: no TLS certificate loaded", "address", cfg.API.Address)
-		} else {
-			apiSrv = api.New(cfg.API.Address, cfg.API.Keys, api.Deps{
-				Config:     mgr.Get,
-				Reload:     mgr.Reload,
-				QueueSize:  q.Size,
-				Reputation: rep,
-				Version:    version,
-				Started:    time.Now(),
-			}, logs.Service)
-			ln, err := net.Listen("tcp", cfg.API.Address)
+		}{
+			{"smtp", cfg.Listeners.SMTP.Address, smtp.ModeInbound, false},
+			{"submission", cfg.Listeners.Submission.Address, smtp.ModeSubmission, false},
+			{"smtps", cfg.Listeners.SMTPS.Address, smtp.ModeSubmission, true},
+		} {
+			if sp.addr == "" || bound[sp.name] != "" {
+				continue
+			}
+			if sp.mode == smtp.ModeSubmission && len(store.Loaded()) == 0 {
+				logs.Service.Warn("submission listener not started: no TLS certificate loaded",
+					"protocol", sp.name, "address", sp.addr)
+				continue
+			}
+			ln, err := net.Listen("tcp", sp.addr)
 			if err != nil {
-				return fmt.Errorf("api listener %s: %w", cfg.API.Address, err)
+				errs = append(errs, fmt.Errorf("%s listener %s: %w", sp.name, sp.addr, err))
+				continue
 			}
-			go func() {
-				if err := apiSrv.Serve(stdtls.NewListener(ln, store.Config())); err != nil {
-					logs.Service.Error("api server failed", "error", err.Error())
+			if sp.implicit {
+				ln = stdtls.NewListener(ln, store.Config())
+			}
+			srv := smtp.New(smtpSettings(cfg, store, sp.mode, sp.implicit, lim, counters), backend, cfg.Server.Workers, logs.Service)
+			go func(name string, srv *smtp.Server, ln net.Listener) {
+				if err := srv.Serve(ln); err != nil {
+					logs.Service.Error("smtp server failed", "protocol", name, "error", err.Error())
 				}
-			}()
-			logs.Service.Info("listening", "protocol", "api", "address", cfg.API.Address,
-				"keys", len(cfg.API.Keys))
+			}(sp.name, srv, ln)
+			servers = append(servers, running{srv, sp.mode, sp.implicit})
+			bound[sp.name] = sp.addr
+			logs.Service.Info("listening", "protocol", sp.name, "address", sp.addr)
 		}
+
+		for _, sp := range []struct {
+			name     string
+			addr     string
+			implicit bool
+		}{
+			{"imap", cfg.Listeners.IMAP.Address, false},
+			{"imaps", cfg.Listeners.IMAPS.Address, true},
+		} {
+			if sp.addr == "" || bound[sp.name] != "" {
+				continue
+			}
+			if len(store.Loaded()) == 0 {
+				logs.Service.Warn("imap listener not started: no TLS certificate loaded",
+					"protocol", sp.name, "address", sp.addr)
+				continue
+			}
+			ln, err := net.Listen("tcp", sp.addr)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("%s listener %s: %w", sp.name, sp.addr, err))
+				continue
+			}
+			if sp.implicit {
+				ln = stdtls.NewListener(ln, store.Config())
+			}
+			srv := imap.New(imapSettings(cfg, store, sp.implicit),
+				imap.Backend{Authenticate: accessAuth}, cfg.Server.Workers, logs.Service)
+			go func(name string, srv *imap.Server, ln net.Listener) {
+				if err := srv.Serve(ln); err != nil {
+					logs.Service.Error("imap server failed", "protocol", name, "error", err.Error())
+				}
+			}(sp.name, srv, ln)
+			imapServers = append(imapServers, imapRunning{srv, sp.implicit})
+			bound[sp.name] = sp.addr
+			logs.Service.Info("listening", "protocol", sp.name, "address", sp.addr)
+		}
+
+		for _, sp := range []struct {
+			name     string
+			addr     string
+			implicit bool
+		}{
+			{"pop3", cfg.Listeners.POP3.Address, false},
+			{"pop3s", cfg.Listeners.POP3S.Address, true},
+		} {
+			if sp.addr == "" || bound[sp.name] != "" {
+				continue
+			}
+			if len(store.Loaded()) == 0 {
+				logs.Service.Warn("pop3 listener not started: no TLS certificate loaded",
+					"protocol", sp.name, "address", sp.addr)
+				continue
+			}
+			ln, err := net.Listen("tcp", sp.addr)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("%s listener %s: %w", sp.name, sp.addr, err))
+				continue
+			}
+			if sp.implicit {
+				ln = stdtls.NewListener(ln, store.Config())
+			}
+			srv := pop3.New(pop3Settings(cfg, store, sp.implicit),
+				pop3.Backend{Authenticate: accessAuth}, cfg.Server.Workers, logs.Service)
+			go func(name string, srv *pop3.Server, ln net.Listener) {
+				if err := srv.Serve(ln); err != nil {
+					logs.Service.Error("pop3 server failed", "protocol", name, "error", err.Error())
+				}
+			}(sp.name, srv, ln)
+			pop3Servers = append(pop3Servers, pop3Running{srv, sp.implicit})
+			bound[sp.name] = sp.addr
+			logs.Service.Info("listening", "protocol", sp.name, "address", sp.addr)
+		}
+
+		// Administrative API (HTTPS, static API keys only).
+		if cfg.API.Enabled && bound["api"] == "" {
+			if len(store.Loaded()) == 0 {
+				logs.Service.Warn("api not started: no TLS certificate loaded", "address", cfg.API.Address)
+			} else {
+				srv := api.New(cfg.API.Address, cfg.API.Keys, api.Deps{
+					Config:     mgr.Get,
+					Reload:     mgr.Reload,
+					QueueSize:  q.Size,
+					Reputation: rep,
+					Version:    version,
+					Started:    started,
+				}, logs.Service)
+				ln, err := net.Listen("tcp", cfg.API.Address)
+				if err != nil {
+					errs = append(errs, fmt.Errorf("api listener %s: %w", cfg.API.Address, err))
+				} else {
+					apiSrv = srv
+					go func() {
+						if err := srv.Serve(stdtls.NewListener(ln, store.Config())); err != nil {
+							logs.Service.Error("api server failed", "error", err.Error())
+						}
+					}()
+					bound["api"] = cfg.API.Address
+					logs.Service.Info("listening", "protocol", "api", "address", cfg.API.Address, "keys", len(cfg.API.Keys))
+				}
+			}
+		}
+
+		publishListeners()
+		return errs
+	}
+
+	// Bind everything possible now. A bind failure at startup (e.g. port
+	// 25 already in use) is fatal, so the problem is visible instead of a
+	// silently missing listener; the same failure on a later reload is
+	// only logged.
+	if errs := ensureListeners(cfg, limits); len(errs) > 0 {
+		return errs[0]
 	}
 
 	updateAll := func(cfg *config.Config, lim limitSet) {
@@ -860,22 +905,12 @@ func runDaemon(cfgPath, pidfile, sockPath string) (err error) {
 				Name: d.Name, Storage: st, Mailboxes: n, DKIM: hasKey,
 			})
 		}
+		// The listeners actually bound, not merely configured: a
+		// TLS-requiring listener that could not start (no certificate)
+		// must not be reported as up, or status hides the real problem.
 		var lst []kstatus.Listener
-		for _, l := range []struct{ name, addr string }{
-			{"smtp", cfg.Listeners.SMTP.Address},
-			{"submission", cfg.Listeners.Submission.Address},
-			{"smtps", cfg.Listeners.SMTPS.Address},
-			{"imap", cfg.Listeners.IMAP.Address},
-			{"imaps", cfg.Listeners.IMAPS.Address},
-			{"pop3", cfg.Listeners.POP3.Address},
-			{"pop3s", cfg.Listeners.POP3S.Address},
-		} {
-			if l.addr != "" {
-				lst = append(lst, kstatus.Listener{Protocol: l.name, Address: l.addr})
-			}
-		}
-		if cfg.API.Enabled {
-			lst = append(lst, kstatus.Listener{Protocol: "api", Address: cfg.API.Address})
+		if p := liveListeners.Load(); p != nil {
+			lst = *p
 		}
 		return kstatus.Build(version, cfg.Server.Hostname, started, domains,
 			len(cfg.Users), lst, store.Loaded(), q.Size(), counters,
@@ -901,10 +936,14 @@ func runDaemon(cfgPath, pidfile, sockPath string) (err error) {
 			for _, w := range store.Reload(tlsParams(mgr.Get())) {
 				logs.Service.Warn("tls warning", "warning", w)
 			}
-			// A certificate may have appeared on a fresh install:
-			// re-evaluate the STARTTLS offer. Limiters are kept, so
-			// quotas are not reset by the periodic refresh.
+			// A certificate may have appeared (certbot renewal, or a
+			// fresh install): update the STARTTLS offer on running
+			// listeners, and bring up any that were waiting for it.
+			// Limiters are kept, so quotas are not reset by the refresh.
 			updateAll(mgr.Get(), limits)
+			for _, err := range ensureListeners(mgr.Get(), limits) {
+				logs.Service.Error("listener not started", "error", err.Error())
+			}
 
 		case s := <-sigs:
 			switch s {
@@ -926,8 +965,17 @@ func runDaemon(cfgPath, pidfile, sockPath string) (err error) {
 				}
 				limits = newLimits(cfg)
 				updateAll(cfg, limits)
+				// Bring up listeners that became possible now that the
+				// certificate is loaded — the whole point of this fix,
+				// so `verta reload` after installing a certificate no
+				// longer needs a `verta restart` to open the mail-access
+				// ports.
+				for _, err := range ensureListeners(cfg, limits) {
+					logs.Service.Error("listener not started", "error", err.Error())
+				}
 				logs.Service.Info("reload complete",
-					"domains", len(cfg.Domains), "tls_loaded", store.Loaded())
+					"domains", len(cfg.Domains), "tls_loaded", store.Loaded(),
+					"listeners", len(*liveListeners.Load()))
 
 			default: // SIGTERM, Interrupt
 				logs.Service.Info("shutdown requested", "signal", s.String())
