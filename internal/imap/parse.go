@@ -23,6 +23,11 @@ type token struct {
 	list []token
 	// isList distinguishes an empty list from an empty string.
 	isList bool
+	// isLiteral marks a value that arrived as a {n} literal. APPEND
+	// relies on it: the message is always a literal, so it must not be
+	// confused with the quoted INTERNALDATE argument (whose content a
+	// real message readily resembles).
+	isLiteral bool
 }
 
 // String renders a token for error messages and simple comparisons.
@@ -147,7 +152,7 @@ func (p *parser) parseLiteral() (token, error) {
 	if err != nil {
 		return token{}, err
 	}
-	return token{str: s}, nil
+	return token{str: s, isLiteral: true}, nil
 }
 
 func (p *parser) parseList() (token, error) {

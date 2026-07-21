@@ -669,28 +669,33 @@ func (s *session) cmdAppend(tag string, p *parser) {
 		var flags maildir.Flags
 		var internal time.Time
 		var data string
-		// Remaining args: [(flags)] [internaldate] literal
+		haveData := false
+		// Remaining args, in order: [(flags)] [internaldate] {literal}.
+		// The message is the literal — never classify it by its content,
+		// a real message resembles an INTERNALDATE closely enough to be
+		// mistaken for one.
 		for {
 			t, err := p.next()
 			if err != nil {
 				break
 			}
 			switch {
+			case t.isLiteral:
+				data, haveData = t.str, true
 			case t.isList:
 				for _, f := range t.list {
 					if mf, ok := maildir.FlagFromIMAP(f.str); ok {
 						flags = flags.Add(mf)
 					}
 				}
-			case looksLikeDate(t.str):
+			default:
+				// The only other optional argument is the INTERNALDATE.
 				if d, err := time.Parse("02-Jan-2006 15:04:05 -0700", t.str); err == nil {
 					internal = d
 				}
-			default:
-				data = t.str
 			}
 		}
-		if data == "" {
+		if !haveData {
 			s.out("%s BAD APPEND needs message data", tag)
 			return
 		}
@@ -714,11 +719,6 @@ func (s *session) cmdAppend(tag string, p *parser) {
 		}
 		s.out("%s OK [APPENDUID %d %d] APPEND completed", tag, mb.UIDValidity(), m.UID)
 	})
-}
-
-// looksLikeDate reports whether a token is an IMAP INTERNALDATE.
-func looksLikeDate(s string) bool {
-	return len(s) >= 20 && strings.Count(s, "-") >= 2 && strings.Contains(s, ":")
 }
 
 // pollAndReport refreshes the selected mailbox and emits untagged

@@ -75,10 +75,18 @@ func TestThunderbirdCopyToSent(t *testing.T) {
 		t.Fatalf("DONE did not terminate IDLE: %q", line)
 	}
 
-	msg := "From: me@example.com\r\nTo: friend@example.com\r\nSubject: inviata\r\n\r\ntesto\r\n"
+	// A realistic message: a Message-ID and a MIME boundary give it the
+	// dashes and colons that made an earlier content heuristic mistake
+	// the body for the INTERNALDATE argument, leaving APPEND with no
+	// data. Thunderbird also sends an INTERNALDATE, so include one.
+	msg := "Message-ID: <a1b2-c3d4-e5f6@example.com>\r\n" +
+		"Date: Tue, 21 Jul 2026 14:29:01 +0200\r\n" +
+		"From: me@example.com\r\nTo: friend@example.com\r\nSubject: inviata\r\n" +
+		"Content-Type: multipart/mixed; boundary=\"----=_Part-12345\"\r\n\r\n" +
+		"------=_Part-12345\r\ntesto della mail\r\n------=_Part-12345--\r\n"
 	c.n++
 	tag := fmt.Sprintf("a%03d", c.n)
-	fmt.Fprintf(c.conn, "%s APPEND \"Sent\" (\\Seen) {%d}\r\n", tag, len(msg))
+	fmt.Fprintf(c.conn, "%s APPEND \"Sent\" (\\Seen) \"21-Jul-2026 14:29:01 +0200\" {%d}\r\n", tag, len(msg))
 	if line := c.readLine(); !strings.HasPrefix(line, "+") {
 		t.Fatalf("APPEND to Sent did not ask for the literal: %q", line)
 	}
