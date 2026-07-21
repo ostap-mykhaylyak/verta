@@ -153,6 +153,30 @@ jobs:
           sudo verta --generate-dkim example.com
           sudo verta --audit || test $? -eq 1
 
+      # The shipped example puts mailboxes in /var/mail; the shipped
+      # unit must let verta write there, or delivery and folder creation
+      # fail with "read-only file system". Prove it against real systemd,
+      # under the exact ProtectSystem the installed unit declares.
+      - name: the unit lets verta write the mail spool
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /var/mail
+          prot=$(sudo sed -n 's/^ProtectSystem=//p' /etc/systemd/system/verta.service)
+          echo "unit ProtectSystem=$prot"
+          [ "$prot" = "full" ] || { echo "expected ProtectSystem=full"; exit 1; }
+          # strict would block it (sanity check on the test itself)...
+          if sudo systemd-run --quiet --wait --pipe \
+               --property=ProtectSystem=strict \
+               /bin/sh -c 'touch /var/mail/verta-ci-strict' 2>/dev/null; then
+            echo "ProtectSystem=strict unexpectedly allowed the write"; exit 1
+          fi
+          # ...full, what the unit uses, must allow it.
+          sudo systemd-run --quiet --wait --pipe \
+            --property=ProtectSystem="$prot" \
+            /bin/sh -c 'touch /var/mail/verta-ci-full'
+          sudo test -f /var/mail/verta-ci-full
+          sudo rm -f /var/mail/verta-ci-full /var/mail/verta-ci-strict
+
       - name: init is idempotent
         working-directory: bundle
         run: |

@@ -29,9 +29,15 @@ LimitNOFILE=65536
 RuntimeDirectory=verta
 RuntimeDirectoryMode=0750
 
-# Hardening
-ProtectSystem=strict
-ReadWritePaths=/var/log/verta /var/lib/verta
+# Hardening.
+# ProtectSystem=full keeps /usr, /boot and /etc read-only while leaving
+# the data hierarchy (/var, /home, /srv) writable — verta writes
+# mailboxes wherever the domain files point them (/var/mail, a system
+# user's home, a bind mount), so it cannot use the stricter
+# ProtectSystem=strict without listing every mail location. For tighter
+# confinement, set ProtectSystem=strict and add each mail path (plus
+# /var/log/verta and /var/lib/verta) to ReadWritePaths.
+ProtectSystem=full
 # Maildir delivery to system users writes under /home.
 ProtectHome=false
 PrivateTmp=true

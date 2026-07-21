@@ -5,6 +5,7 @@ package bootstrap
 
 import (
 	"bufio"
+	"bytes"
 	_ "embed"
 	"fmt"
 	"io"
@@ -115,7 +116,12 @@ func Init(version string, w io.Writer) error {
 	if err := writeIfAbsent(w, examplePath, exampleDomain, 0o640); err != nil {
 		return err
 	}
-	if err := writeIfAbsent(w, unitPath, Unit, 0o644); err != nil {
+	// The systemd unit is verta's own file, not the operator's:
+	// customization goes in a `systemctl edit` drop-in, which survives
+	// this. So unlike the configuration it is written every time, and
+	// an upgrade that fixes the unit (as v0.1.3 fixed the read-only
+	// mail directory) actually reaches the machine on the next --init.
+	if err := writeUnit(w, unitPath, Unit); err != nil {
 		return err
 	}
 
@@ -195,6 +201,22 @@ func installSelf(w io.Writer) error {
 		return fmt.Errorf("installing %s: %w", paths.Binary, err)
 	}
 	fmt.Fprintf(w, "installed %s\n", paths.Binary)
+	return nil
+}
+
+// writeUnit installs the systemd unit, overwriting an out-of-date
+// copy. It reports whether anything changed so a re-run is quiet when
+// the unit is already current, and reminds the operator to reload
+// systemd when it is not.
+func writeUnit(w io.Writer, path string, data []byte) error {
+	if existing, err := os.ReadFile(path); err == nil && bytes.Equal(existing, data) {
+		fmt.Fprintf(w, "systemd unit %s is up to date\n", path)
+		return nil
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "installed systemd unit %s (run: systemctl daemon-reload)\n", path)
 	return nil
 }
 
