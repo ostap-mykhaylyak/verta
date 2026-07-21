@@ -332,7 +332,11 @@ messages.
 
 Folders follow Maildir++: `INBOX` is the mailbox root, everything else
 is a `.`-prefixed subdirectory (`.Sent`, `.Drafts`, `.Trash`,
-`.Spam`).
+`.Spam`). The standard folders are created on first login and tagged
+with their RFC 6154 special-use attributes (`\Sent`, `\Drafts`,
+`\Trash`, `\Junk` on Spam), so a client maps its own Sent/Drafts/
+Trash/Junk to them with no configuration. `\Junk` is the Spam folder,
+so the user's junk and the server's spam quarantine are one place.
 
 ---
 

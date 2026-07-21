@@ -109,7 +109,7 @@ func (s *session) readLiteral(n int) (string, error) {
 
 // capabilities lists what the server offers in the current state.
 func (s *session) capabilities() string {
-	caps := []string{"IMAP4rev1", "IDLE", "UIDPLUS", "MOVE", "NAMESPACE", "CHILDREN"}
+	caps := []string{"IMAP4rev1", "IDLE", "UIDPLUS", "MOVE", "NAMESPACE", "CHILDREN", "SPECIAL-USE"}
 	set := s.set()
 	if !s.tls && set.TLS != nil {
 		caps = append(caps, "STARTTLS")
@@ -199,7 +199,7 @@ func (s *session) dispatch(line string) (quit bool) {
 	case "SELECT", "EXAMINE":
 		s.cmdSelect(tag, p, cmd == "EXAMINE")
 	case "LIST", "LSUB":
-		s.cmdList(tag, p)
+		s.cmdList(tag, cmd, p)
 	case "STATUS":
 		s.cmdStatus(tag, p)
 	case "CREATE":
@@ -309,6 +309,14 @@ func (s *session) authenticate(tag, user, pass string) {
 		return
 	}
 	s.user, s.root, s.state = strings.ToLower(user), root, stateAuthenticated
+	// Make sure Sent/Drafts/Trash/Spam exist before the client looks
+	// for them: a mail client with nowhere to file a sent message
+	// stalls. Non-fatal — a read-only or missing home should not block
+	// login, the folders just will not be there.
+	if err := maildir.EnsureStandardFolders(s.root); err != nil {
+		s.srv.log.Warn("could not create standard folders",
+			"protocol", "imap", "user", s.user, "error", err.Error())
+	}
 	s.srv.log.Info("authentication succeeded",
 		"event", "auth_ok", "protocol", "imap", "ip", s.ip, "user", s.user)
 	s.out("%s OK [CAPABILITY %s] LOGIN completed", tag, s.capabilities())
@@ -453,18 +461,22 @@ func (s *session) cmdSelect(tag string, p *parser, examine bool) {
 	})
 }
 
-func (s *session) cmdList(tag string, p *parser) {
+// cmdList serves both LIST and LSUB; verb is the one to echo, since a
+// client matches untagged responses by the command name it sent —
+// answering an LSUB with "* LIST" leaves its subscribed-folder view
+// empty.
+func (s *session) cmdList(tag, verb string, p *parser) {
 	s.requireAuth(tag, func() {
 		refTok, err1 := p.next()
 		patTok, err2 := p.next()
 		if err1 != nil || err2 != nil {
-			s.out("%s BAD LIST needs a reference and a pattern", tag)
+			s.out("%s BAD %s needs a reference and a pattern", tag, verb)
 			return
 		}
 		// A bare "" pattern is the hierarchy delimiter probe.
 		if patTok.str == "" {
-			s.out(`* LIST (\Noselect) "." ""`)
-			s.out("%s OK LIST completed", tag)
+			s.out(`* %s (\Noselect) "." ""`, verb)
+			s.out("%s OK %s completed", tag, verb)
 			return
 		}
 		folders, err := maildir.Folders(s.root)
@@ -475,10 +487,14 @@ func (s *session) cmdList(tag string, p *parser) {
 		pattern := refTok.str + patTok.str
 		for _, f := range folders {
 			if matchPattern(pattern, f) {
-				s.out(`* LIST () "." %s`, quote(f))
+				// RFC 6154: tag Sent/Drafts/Trash/Spam with their
+				// special-use attribute, so the client maps its own
+				// Sent/Drafts/Trash/Junk to them without guessing.
+				attrs := maildir.SpecialUse(f)
+				s.out(`* %s (%s) "." %s`, verb, attrs, quote(f))
 			}
 		}
-		s.out("%s OK LIST completed", tag)
+		s.out("%s OK %s completed", tag, verb)
 	})
 }
 
@@ -762,9 +778,15 @@ func (s *session) cmdIdle(tag string) {
 				s.pollAndReport()
 			case <-deadline:
 				// Politely end a long IDLE so the connection does not
-				// rot behind a NAT idle timeout.
+				// rot behind a NAT idle timeout. The reader goroutine is
+				// still blocked on ReadString: unblock it with an
+				// immediate deadline and drain it before returning, or
+				// the run loop would read from the same reader
+				// concurrently.
 				s.out("* BYE idle timeout")
 				s.out("%s OK IDLE terminated", tag)
+				s.conn.SetReadDeadline(time.Now())
+				<-done
 				return
 			}
 		}

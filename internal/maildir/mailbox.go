@@ -477,6 +477,57 @@ func CreateFolder(root, folder string) error {
 	return nil
 }
 
+// StandardFolder is a well-known mailbox with its RFC 6154 special-use
+// attribute, so a client can identify it without the user configuring
+// anything.
+type StandardFolder struct {
+	Name       string
+	SpecialUse string // e.g. `\Sent`
+}
+
+// StandardFolders are the folders every account gets: without them a
+// client like Thunderbird has no Sent to copy into and stalls trying
+// to create one. Spam carries \Junk and is the same folder the spam
+// filter quarantines into, so the user's Junk and the server's
+// quarantine are one place.
+func StandardFolders() []StandardFolder {
+	return []StandardFolder{
+		{"Sent", `\Sent`},
+		{"Drafts", `\Drafts`},
+		{"Trash", `\Trash`},
+		{"Spam", `\Junk`},
+	}
+}
+
+// SpecialUse returns the RFC 6154 attribute of a folder, or "" when it
+// is an ordinary mailbox. INBOX has no special-use marker.
+func SpecialUse(folder string) string {
+	for _, f := range StandardFolders() {
+		if strings.EqualFold(folder, f.Name) {
+			return f.SpecialUse
+		}
+	}
+	return ""
+}
+
+// EnsureStandardFolders creates any missing standard folder under the
+// account root. It is idempotent and safe to call on every login; an
+// existing folder is left untouched.
+func EnsureStandardFolders(root string) error {
+	for _, f := range StandardFolders() {
+		dir := folderDir(root, f.Name)
+		if _, err := os.Stat(dir); err == nil {
+			continue
+		}
+		for _, sub := range []string{"", "tmp", "new", "cur"} {
+			if err := os.MkdirAll(filepath.Join(dir, sub), 0o700); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // DeleteFolder removes a Maildir++ subfolder and its messages.
 func DeleteFolder(root, folder string) error {
 	if strings.EqualFold(folder, Inbox) {
