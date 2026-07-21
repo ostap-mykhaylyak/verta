@@ -63,11 +63,34 @@ func (s *session) cmdFetch(tag string, p *parser, uidMode bool) {
 					payload = append(payload, "FLAGS ("+strings.Join(m.Flags.IMAPFlags(m.Recent), " ")+")")
 				}
 			}
+			payload = literalsLast(payload)
 			s.raw(fmt.Sprintf("* %d FETCH (%s)\r\n", m.Seq, strings.Join(payload, " ")))
 		}
 		s.flush()
 		s.out("%s OK FETCH completed", tag)
 	})
+}
+
+// literalsLast reorders a FETCH payload so every data item carrying a
+// literal ({n}CRLF...) is emitted after the single-line items, keeping
+// the big BODY[] literal at the end of the response. RFC 3501 does not
+// mandate an order, but every mainstream server (Dovecot included) ends
+// a FETCH with the body literal, and Thunderbird's message cache
+// mishandles data that follows it — it caches the body truncated, so on
+// re-open the message shows as scrambled source. A literal item is the
+// only kind that contains a CRLF; single-line items (UID, RFC822.SIZE,
+// FLAGS, ...) never do, which makes the split exact. Relative order is
+// otherwise preserved.
+func literalsLast(items []string) []string {
+	var plain, lit []string
+	for _, it := range items {
+		if strings.Contains(it, "\r\n") {
+			lit = append(lit, it)
+		} else {
+			plain = append(plain, it)
+		}
+	}
+	return append(plain, lit...)
 }
 
 // fetchItems renders the requested data items for one message. It
