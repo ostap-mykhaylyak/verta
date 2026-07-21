@@ -116,11 +116,9 @@ func (s *session) fetchItems(m *maildir.Message, spec string, uidMode bool) (out
 			out = append(out, "RFC822.TEXT "+literal(bodyOf(data)))
 			markSeen = true
 		case strings.HasPrefix(up, "BODY.PEEK["):
-			section := item[len("BODY.PEEK[") : len(item)-1]
-			out = append(out, "BODY["+section+"] "+literal(s.section(m, section)))
+			out = append(out, s.fetchBody(m, item))
 		case strings.HasPrefix(up, "BODY["):
-			section := item[len("BODY[") : len(item)-1]
-			out = append(out, "BODY["+section+"] "+literal(s.section(m, section)))
+			out = append(out, s.fetchBody(m, item))
 			markSeen = true
 		}
 	}
@@ -162,6 +160,45 @@ func splitItems(spec string) []string {
 }
 
 // section renders a BODY[...] section specifier.
+// fetchBody renders one BODY[...] / BODY.PEEK[...] item, including the
+// partial form BODY[section]<offset.length> that clients use to pull a
+// large part in chunks. Missing this made verta return an empty body
+// for every message big enough that the client fetched it partially —
+// a newsletter, anything with a sizable HTML part — while small
+// messages fetched whole worked. The response always echoes BODY (not
+// PEEK) and, for a partial, the origin octet.
+func (s *session) fetchBody(m *maildir.Message, item string) string {
+	open := strings.IndexByte(item, '[')
+	close := strings.IndexByte(item, ']')
+	if open < 0 || close < 0 || close < open {
+		return "BODY[] " + literal("")
+	}
+	section := item[open+1 : close]
+	content := s.section(m, section)
+
+	// An optional <offset> or <offset.length> partial follows the ].
+	rest := item[close+1:]
+	if strings.HasPrefix(rest, "<") && strings.HasSuffix(rest, ">") {
+		offStr, lenStr, hasLen := strings.Cut(rest[1:len(rest)-1], ".")
+		off, err := strconv.Atoi(offStr)
+		if err != nil || off < 0 {
+			off = 0
+		}
+		if off >= len(content) {
+			content = ""
+		} else {
+			content = content[off:]
+		}
+		if hasLen {
+			if n, err := strconv.Atoi(lenStr); err == nil && n >= 0 && n < len(content) {
+				content = content[:n]
+			}
+		}
+		return fmt.Sprintf("BODY[%s]<%d> %s", section, off, literal(content))
+	}
+	return "BODY[" + section + "] " + literal(content)
+}
+
 func (s *session) section(m *maildir.Message, section string) string {
 	data, err := m.Read()
 	if err != nil {

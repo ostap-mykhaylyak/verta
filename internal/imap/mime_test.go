@@ -2,6 +2,8 @@ package imap
 
 import (
 	"fmt"
+	"io"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -134,5 +136,75 @@ func TestUnparsableMultipartFallsBackToText(t *testing.T) {
 	// The raw body is still fetchable, not empty.
 	if got := resolveSection(root, "1"); !strings.Contains(got, "ciao") {
 		t.Errorf("BODY[1] lost the content:\n%s", got)
+	}
+}
+
+// Clients fetch a large body part in chunks with BODY[section]<off.len>.
+// verta returned empty for the partial form, so any message with a
+// sizable HTML part (a newsletter) displayed blank while small messages
+// fetched whole worked. Reproduce the partial fetch end to end.
+func TestPartialBodyFetch(t *testing.T) {
+	root := t.TempDir()
+	addr := testServer(t, root)
+	c := dial(t, addr)
+	c.conn.SetDeadline(time.Now().Add(10 * time.Second))
+	c.login()
+
+	// A message whose HTML part is bigger than one client chunk.
+	html := "<html><body>" + strings.Repeat("<p>riga di newsletter</p>", 4000) + "</body></html>"
+	msg := "From: news@brand.com\r\nSubject: grande\r\nMIME-Version: 1.0\r\n" +
+		"Content-Type: multipart/alternative; boundary=\"B\"\r\n\r\n" +
+		"--B\r\nContent-Type: text/plain\r\n\r\ntesto\r\n" +
+		"--B\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n" + html + "\r\n--B--\r\n"
+	appendAndSelect(t, c, msg)
+
+	// The whole HTML part, for reference.
+	full := bodyLiteral(t, c, "FETCH 1 (BODY.PEEK[2])")
+	if len(full) < 90000 {
+		t.Fatalf("HTML part unexpectedly small: %d bytes", len(full))
+	}
+
+	// Fetch it in 16 KB chunks the way a client does, and reassemble.
+	var got strings.Builder
+	const chunk = 16384
+	for off := 0; off < len(full); off += chunk {
+		part := bodyLiteral(t, c, fmt.Sprintf("FETCH 1 (BODY.PEEK[2]<%d.%d>)", off, chunk))
+		if part == "" {
+			t.Fatalf("partial BODY[2]<%d.%d> returned empty", off, chunk)
+		}
+		got.WriteString(part)
+	}
+	if got.String() != full {
+		t.Errorf("chunked fetch did not reassemble the part: got %d bytes, want %d",
+			got.Len(), len(full))
+	}
+}
+
+// bodyLiteral runs a FETCH expected to return one literal and returns
+// exactly the literal's bytes, honoring the {n} count.
+func bodyLiteral(t *testing.T, c *client, cmd string) string {
+	t.Helper()
+	c.n++
+	tag := fmt.Sprintf("a%03d", c.n)
+	fmt.Fprintf(c.conn, "%s %s\r\n", tag, cmd)
+	for {
+		line := c.readLine()
+		if i := strings.LastIndex(line, "{"); i >= 0 && strings.HasSuffix(line, "}") {
+			n, _ := strconv.Atoi(line[i+1 : len(line)-1])
+			buf := make([]byte, n)
+			if _, err := io.ReadFull(c.r, buf); err != nil {
+				t.Fatalf("reading literal: %v", err)
+			}
+			// consume through the tagged completion
+			for {
+				if l := c.readLine(); strings.HasPrefix(l, tag+" ") {
+					break
+				}
+			}
+			return string(buf)
+		}
+		if strings.HasPrefix(line, tag+" ") {
+			return ""
+		}
 	}
 }
