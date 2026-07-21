@@ -154,6 +154,14 @@ func TestDeliverToVirtualMailbox(t *testing.T) {
 	if !strings.Contains(text, "hello") {
 		t.Errorf("missing body:\n%s", text)
 	}
+	// The stored message must use canonical CRLF line endings: a bare
+	// LF understates RFC822.SIZE by one byte per line, which makes a
+	// client's cached copy disagree with the server and show raw source.
+	for i := 0; i < len(msg); i++ {
+		if msg[i] == '\n' && (i == 0 || msg[i-1] != '\r') {
+			t.Fatalf("stored message has a bare LF at byte %d — not canonical CRLF", i)
+		}
+	}
 }
 
 func TestRelayDenied(t *testing.T) {

@@ -487,7 +487,14 @@ func (s *session) cmdData() (quit bool) {
 		return false
 	}
 
-	body := buf.Bytes()
+	// textproto.DotReader collapses the wire CRLF line endings to bare
+	// LF. A mail message is canonically CRLF (RFC 5322), and storing it
+	// as LF understates RFC822.SIZE by one byte per line: a client that
+	// normalizes to CRLF then sees its cached copy disagree with the
+	// server's size, discards it, and shows the raw source. Restoring
+	// CRLF now also gives DKIM verification the exact bytes the sender
+	// signed.
+	body := ensureCRLF(buf.Bytes())
 	spam := false
 	var authResults []byte
 
@@ -615,4 +622,28 @@ func splitAddr(email string) (local, domain string, ok bool) {
 		return "", "", false
 	}
 	return email[:at], strings.ToLower(email[at+1:]), true
+}
+
+// ensureCRLF rewrites every bare LF as CRLF, leaving existing CRLF
+// untouched, so a stored message is in the canonical RFC 5322 line
+// ending. The common case (no bare LF) allocates nothing.
+func ensureCRLF(data []byte) []byte {
+	bare := false
+	for i := 0; i < len(data); i++ {
+		if data[i] == '\n' && (i == 0 || data[i-1] != '\r') {
+			bare = true
+			break
+		}
+	}
+	if !bare {
+		return data
+	}
+	out := make([]byte, 0, len(data)+len(data)/32)
+	for i := 0; i < len(data); i++ {
+		if data[i] == '\n' && (i == 0 || data[i-1] != '\r') {
+			out = append(out, '\r')
+		}
+		out = append(out, data[i])
+	}
+	return out
 }
