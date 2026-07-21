@@ -68,18 +68,25 @@ func buildPart(rawHeader, body []byte) *mimePart {
 	}
 
 	if p.ctype == "MULTIPART" {
-		boundary := p.params["BOUNDARY"]
-		if boundary == "" {
-			return p // malformed multipart: treat as an opaque leaf
-		}
-		mr := multipart.NewReader(bytes.NewReader(body), boundary)
-		for {
-			part, err := mr.NextRawPart()
-			if err != nil {
-				break
+		if boundary := p.params["BOUNDARY"]; boundary != "" {
+			mr := multipart.NewReader(bytes.NewReader(body), boundary)
+			for {
+				part, err := mr.NextRawPart()
+				if err != nil {
+					break
+				}
+				childBody, _ := io.ReadAll(part)
+				p.children = append(p.children, buildPart(rawHeaderOf(part.Header), childBody))
 			}
-			childBody, _ := io.ReadAll(part)
-			p.children = append(p.children, buildPart(rawHeaderOf(part.Header), childBody))
+		}
+		if len(p.children) == 0 {
+			// A part that claims to be multipart but yields no children
+			// (missing boundary, a body we could not split) must not be
+			// reported as a multipart leaf: a client cannot render that
+			// and shows an empty message. Fall back to a single text
+			// part so the raw content is at least visible.
+			p.ctype, p.csub = "TEXT", "PLAIN"
+			p.params = map[string]string{"CHARSET": "US-ASCII"}
 		}
 	}
 	return p

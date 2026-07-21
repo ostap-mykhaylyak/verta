@@ -116,3 +116,23 @@ func afterFetch(s string) string {
 	}
 	return s
 }
+
+// A part that claims multipart but cannot be dissected must never be
+// rendered as a multipart leaf — that displays as an empty message.
+// It falls back to a text part so the content stays visible.
+func TestUnparsableMultipartFallsBackToText(t *testing.T) {
+	msg := "Content-Type: multipart/alternative; boundary=\"AAA\"\r\n\r\n" +
+		"--BBB\r\nContent-Type: text/html\r\n\r\n<p>ciao</p>\r\n--BBB--\r\n"
+	root := parseMessage([]byte(msg))
+	s := structure(root, true)
+	if strings.Contains(s, `"MULTIPART"`) {
+		t.Errorf("unparsable multipart still rendered as a multipart leaf:\n%s", s)
+	}
+	if !strings.Contains(s, `"TEXT"`) {
+		t.Errorf("fallback should be a text part:\n%s", s)
+	}
+	// The raw body is still fetchable, not empty.
+	if got := resolveSection(root, "1"); !strings.Contains(got, "ciao") {
+		t.Errorf("BODY[1] lost the content:\n%s", got)
+	}
+}
