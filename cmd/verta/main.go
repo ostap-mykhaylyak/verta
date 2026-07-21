@@ -560,6 +560,7 @@ func runDaemon(cfgPath, pidfile, sockPath string) (err error) {
 		Screen: func(ip, helo, from string, data []byte) smtp.ScreenResult {
 			cfg := mgr.Get()
 			var out smtp.ScreenResult
+			var auth antispam.Auth
 
 			// --- SPF / DKIM / DMARC ---
 			if cfg.MailAuth.IsEnabled() {
@@ -570,6 +571,11 @@ func runDaemon(cfgPath, pidfile, sockPath string) (err error) {
 					"spf", res.SPF, "dkim", res.DKIM, "dmarc", res.DMARC)
 				out.AuthResults = res.AuthResults
 				out.Reason = res.Reason
+				auth = antispam.Auth{
+					SPFPass:   res.SPF == "pass",
+					DKIMPass:  res.DKIM == "pass",
+					DMARCPass: res.DMARC == "pass",
+				}
 				switch res.Action {
 				case mailauth.Reject:
 					out.Action = smtp.ScreenReject
@@ -593,7 +599,7 @@ func runDaemon(cfgPath, pidfile, sockPath string) (err error) {
 
 			// --- antispam scoring ---
 			if spamEngine != nil {
-				v := spamEngine.Check(data)
+				v := spamEngine.Check(data, auth)
 				out.SpamHeader = v.Header(cfg.Antispam.TagScore)
 				logs.Service.Info("message scored",
 					"event", "spam_score", "protocol", "smtp", "ip", ip, "from", from,

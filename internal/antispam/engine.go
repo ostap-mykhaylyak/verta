@@ -47,6 +47,16 @@ type Lister interface {
 	ListedDomain(domain string) bool
 }
 
+// Auth carries the SPF/DKIM/DMARC outcome so scoring can credit
+// authenticated mail: a message a reputable domain vouches for is
+// accountable — if it turns out to be spam, the domain is blocked —
+// so a couple of heuristic hits must not bounce it.
+type Auth struct {
+	SPFPass   bool
+	DKIMPass  bool
+	DMARCPass bool
+}
+
 // Engine combines the Bayesian classifier, the heuristics, the URI
 // blacklists and the antivirus into one score.
 type Engine struct {
@@ -58,8 +68,8 @@ type Engine struct {
 	BayesWeight float64
 }
 
-// Check scores one message.
-func (e *Engine) Check(data []byte) Verdict {
+// Check scores one message, given the result of its authentication.
+func (e *Engine) Check(data []byte, auth Auth) Verdict {
 	v := Verdict{Bayes: -1}
 
 	analysis := AnalyzeHeaders(data)
@@ -77,9 +87,13 @@ func (e *Engine) Check(data []byte) Verdict {
 			}
 			seen[d] = true
 			if e.URIBL.ListedDomain(d) {
-				v.Score += 25
+				// One listing is meaningful but not decisive on its
+				// own: URI blacklists carry false positives (a shared
+				// redirector, a tracking domain), so it is weighed to
+				// combine with other signals, not to condemn alone.
+				v.Score += 12
 				v.Rules = append(v.Rules, "URIBL_LISTED")
-				break // one listing is enough; do not stack them
+				break
 			}
 		}
 	}
@@ -104,6 +118,23 @@ func (e *Engine) Check(data []byte) Verdict {
 				v.Rules = append(v.Rules, "BAYES_00")
 			}
 		}
+	}
+
+	// Authentication credit: a message that passes DMARC (or is at
+	// least DKIM/SPF authenticated) comes from an accountable domain.
+	// Discount it so ordinary heuristic noise cannot push legitimate
+	// authenticated mail over the reject threshold. Only the strongest
+	// applicable signal is credited, not all three.
+	switch {
+	case auth.DMARCPass:
+		v.Score -= 15
+		v.Rules = append(v.Rules, "DMARC_PASS")
+	case auth.DKIMPass:
+		v.Score -= 10
+		v.Rules = append(v.Rules, "DKIM_PASS")
+	case auth.SPFPass:
+		v.Score -= 3
+		v.Rules = append(v.Rules, "SPF_PASS")
 	}
 
 	// Antivirus is decisive: a positive hit overrides every score.

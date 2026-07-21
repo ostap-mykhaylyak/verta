@@ -442,6 +442,15 @@ log space, so a long message cannot underflow to a nonsensical score,
 and ham evidence is weighted double, because a false positive costs
 the user far more than a false negative.
 
+**Authenticated mail is credited.** A message that passes DMARC (or is
+at least DKIM- or SPF-authenticated) comes from an accountable domain —
+if it turns out to be spam, you block the domain — so its score is
+discounted (`DMARC_PASS`, shown in `X-Spam-Status`). Ordinary heuristic
+noise, like a forwarded newsletter with many links, one on a URI
+blacklist, no longer bounces legitimate authenticated mail. A blatantly
+spammy message that happens to be authenticated still scores over the
+threshold and is caught.
+
 Executable attachments (`.exe`, `.scr`, `.js`, `.vbs`, …) are refused
 outright whatever the score, and a double extension —
 `fattura.pdf.exe`, which a client hiding known extensions shows as

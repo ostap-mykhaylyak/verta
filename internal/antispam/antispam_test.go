@@ -176,7 +176,7 @@ func TestEngineCombinesSignals(t *testing.T) {
 	clean := []byte("From: collega@azienda.it\r\nMessage-ID: <1@azienda.it>\r\n" +
 		"Date: Mon, 1 Jan 2026 00:00:00 +0000\r\nTo: me@azienda.it\r\nSubject: verbale riunione\r\n\r\n" +
 		"Confermo la riunione di domani, allego il verbale e le note tecniche del progetto.\r\n")
-	v := e.Check(clean)
+	v := e.Check(clean, Auth{})
 	if v.Score >= 10 {
 		t.Errorf("clean message scored %.1f (rules %v, bayes %.3f)", v.Score, v.Rules, v.Bayes)
 	}
@@ -184,15 +184,54 @@ func TestEngineCombinesSignals(t *testing.T) {
 	// A blacklisted link adds a decisive amount.
 	listed := []byte("From: a@b.it\r\nMessage-ID: <1@b.it>\r\nDate: x\r\nTo: c@d.it\r\nSubject: offerta\r\n\r\n" +
 		"vai su https://malicious.tld/win\r\n")
-	v = e.Check(listed)
+	v = e.Check(listed, Auth{})
 	if !strings.Contains(strings.Join(v.Rules, ","), "URIBL_LISTED") {
 		t.Errorf("URIBL rule did not fire: %v", v.Rules)
 	}
 
 	// A virus pins the score to the maximum whatever else says.
-	v = e.Check([]byte("From: a@b.it\r\n\r\nEICAR payload"))
+	v = e.Check([]byte("From: a@b.it\r\n\r\nEICAR payload"), Auth{})
 	if v.Virus == "" || v.Score != 100 {
 		t.Errorf("virus verdict = %q score %.1f, want a named virus at 100", v.Virus, v.Score)
+	}
+}
+
+// A legitimate authenticated message (a forwarded notification: many
+// links, one on a URI blacklist) must not be rejected when it passes
+// DMARC. This reproduces a real report where a Gmail-forwarded Discord
+// mail with spf/dkim/dmarc=pass was bounced with a spam score of 31.
+func TestAuthenticatedMailIsNotRejected(t *testing.T) {
+	e := &Engine{URIBL: stubLister{bad: "tracking.example"}}
+
+	body := "Message-ID: <fwd-1@gmail.com>\r\nDate: Tue, 21 Jul 2026 16:00:00 +0000\r\n" +
+		"From: ostap@gmail.com\r\nTo: test@server.tld\r\nSubject: Fwd: Discord\r\n\r\n"
+	for i := 0; i < 30; i++ {
+		body += fmt.Sprintf("see https://link%d.example/x and https://tracking.example/%d\r\n", i, i)
+	}
+	msg := []byte(body)
+
+	// Unauthenticated, the heuristics plus the URIBL push it into the
+	// rejectable range.
+	bare := e.Check(msg, Auth{})
+	t.Logf("unauthenticated score=%.1f rules=%v", bare.Score, bare.Rules)
+
+	// Passing DMARC discounts it below a reject threshold of 20.
+	authed := e.Check(msg, Auth{SPFPass: true, DKIMPass: true, DMARCPass: true})
+	t.Logf("DMARC-pass score=%.1f rules=%v", authed.Score, authed.Rules)
+	if authed.Score >= 20 {
+		t.Errorf("authenticated mail still scores %.1f (>= reject 20): %v", authed.Score, authed.Rules)
+	}
+	if authed.Score >= bare.Score {
+		t.Errorf("DMARC pass did not lower the score: %.1f vs %.1f", authed.Score, bare.Score)
+	}
+	found := false
+	for _, r := range authed.Rules {
+		if r == "DMARC_PASS" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the discount should be visible as DMARC_PASS: %v", authed.Rules)
 	}
 }
 
