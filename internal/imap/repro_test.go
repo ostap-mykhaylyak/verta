@@ -95,10 +95,18 @@ func TestThunderbirdCopyToSent(t *testing.T) {
 		t.Fatalf("APPEND to Sent -> %q, want OK APPENDUID", line)
 	}
 
-	// The copy is really there.
+	// The copy must be there in full, not just its headers: fetch the
+	// whole message back and compare it to what was appended, and check
+	// the reported size matches.
 	c.ok(`SELECT "Sent"`)
-	fetched := strings.Join(c.ok("FETCH 1 (FLAGS BODY.PEEK[])"), "\n")
+	fetched := strings.Join(c.ok("FETCH 1 (RFC822.SIZE BODY.PEEK[])"), "\n")
 	if !strings.Contains(fetched, "inviata") {
-		t.Errorf("sent message not found in Sent:\n%s", fetched)
+		t.Errorf("Subject missing from the stored message:\n%s", fetched)
+	}
+	if !strings.Contains(fetched, "testo della mail") {
+		t.Errorf("message BODY lost — the copy in Sent is empty:\n%s", fetched)
+	}
+	if !strings.Contains(fetched, fmt.Sprintf("RFC822.SIZE %d", len(msg))) {
+		t.Errorf("stored size does not match the %d bytes appended:\n%s", len(msg), fetched)
 	}
 }

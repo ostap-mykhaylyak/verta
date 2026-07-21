@@ -793,8 +793,7 @@ reputation with warm-up, the administrative API, container identity
 and the diagnostic commands.
 
 Deliberately not implemented yet: Prometheus metrics, ARC (RFC 8617),
-OAuth2, full MIME `BODYSTRUCTURE` parsing, and Linux user
-authentication via PAM.
+OAuth2, and Linux user authentication via PAM.
 
 ## License
 

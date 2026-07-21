@@ -179,11 +179,11 @@ func (s *session) section(m *maildir.Message, section string) string {
 		return filterHeaders(data, fieldList(section), true)
 	case strings.HasPrefix(up, "HEADER.FIELDS"):
 		return filterHeaders(data, fieldList(section), false)
-	case up == "1":
-		// Single-part messages: part 1 is the body.
-		return bodyOf(data)
 	}
-	return ""
+	// A numeric part address (1, 1.2, 1.MIME, ...): resolve it against
+	// the MIME tree so a client fetching the parts of a multipart
+	// message gets the real part, not the whole body.
+	return resolveSection(parseMessage(data), section)
 }
 
 // fieldList extracts the header names from "HEADER.FIELDS (A B C)".
@@ -311,45 +311,7 @@ func (s *session) bodyStructure(m *maildir.Message, extended bool) string {
 	if err != nil {
 		return "NIL"
 	}
-	msg, err := mail.ReadMessage(bytes.NewReader(data))
-	ctype, subtype, charset := "TEXT", "PLAIN", "US-ASCII"
-	encoding := "7BIT"
-	if err == nil {
-		if ct := msg.Header.Get("Content-Type"); ct != "" {
-			mediaType, params := parseContentType(ct)
-			if t, st, ok := strings.Cut(mediaType, "/"); ok {
-				ctype, subtype = strings.ToUpper(t), strings.ToUpper(st)
-			}
-			if cs, ok := params["charset"]; ok {
-				charset = strings.ToUpper(cs)
-			}
-		}
-		if e := msg.Header.Get("Content-Transfer-Encoding"); e != "" {
-			encoding = strings.ToUpper(strings.TrimSpace(e))
-		}
-	}
-	body := bodyOf(data)
-	lines := strings.Count(body, "\n")
-	base := fmt.Sprintf("(%s %s (%s %s) NIL NIL %s %d %d)",
-		quote(ctype), quote(subtype), quote("CHARSET"), quote(charset),
-		quote(encoding), len(body), lines)
-	return base
-}
-
-// parseContentType splits a Content-Type header into media type and
-// parameters, without pulling in a full MIME parser.
-func parseContentType(v string) (string, map[string]string) {
-	parts := strings.Split(v, ";")
-	media := strings.ToLower(strings.TrimSpace(parts[0]))
-	params := map[string]string{}
-	for _, p := range parts[1:] {
-		k, val, ok := strings.Cut(p, "=")
-		if !ok {
-			continue
-		}
-		params[strings.ToLower(strings.TrimSpace(k))] = strings.Trim(strings.TrimSpace(val), `"`)
-	}
-	return media, params
+	return structure(parseMessage(data), extended)
 }
 
 func (s *session) cmdStore(tag string, p *parser, uidMode bool) {
