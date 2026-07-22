@@ -129,6 +129,25 @@ func TestAliasLoopTerminates(t *testing.T) {
 	}
 }
 
+// A domain with no mailboxes and a catch-all pointing at an external
+// address forwards *everything* it receives: the "@studenti.scuola.it ->
+// one Gmail" case. Any local part resolves to the same remote.
+func TestCatchAllToExternalForwardsEverything(t *testing.T) {
+	cfg := &config.Config{
+		Domains: []config.Domain{{
+			Name:     "studenti.scuola.it",
+			CatchAll: config.Targets{"classe3b@gmail.com"},
+		}},
+	}
+	for _, addr := range []string{"mario.rossi@studenti.scuola.it", "chiunque@studenti.scuola.it"} {
+		p := Resolve(cfg, secret, addr)
+		if len(p.Local) != 0 {
+			t.Errorf("%s must not deliver locally: %v", addr, locals(p))
+		}
+		eq(t, p.Remote, []string{"classe3b@gmail.com"}, "remote for "+addr)
+	}
+}
+
 func TestSRSBounceReturns(t *testing.T) {
 	bounce := srs.Forward(secret, "example.com", "news@brand.com")
 	p := Resolve(testCfg(), secret, bounce)
