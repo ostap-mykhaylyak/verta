@@ -168,6 +168,48 @@ rate_limit:
     user:
       messages_per_hour: 500
       recipients_per_hour: 1000
+  # Custom per-dimension limits, layered on the built-ins above. Each
+  # rule keys a token bucket on one dimension:
+  #   by: ip | sender_domain | sender_mailbox | recipient | recipient_domain
+  # 'match' pins the rule to one value (an override that replaces the
+  # generic limit for it); omit it for a generic rule (one bucket per
+  # distinct value). 'direction' (inbound|outbound) scopes it; omit for
+  # both. 'window' is a Go duration (default 1h). 'messages' counts whole
+  # messages, 'recipients' counts RCPTs.
+  # rules:
+  #   - by: recipient_domain          # don't hammer any one destination
+  #     messages: 200
+  #   - by: recipient_domain          # ...but allow more to Gmail
+  #     match: gmail.com
+  #     messages: 1000
+  #   - by: recipient                 # protect a mailbox from bombing
+  #     direction: inbound
+  #     recipients: 100
+  #   - by: sender_mailbox            # a trusted bulk sender
+  #     match: newsletter@example.com
+  #     direction: outbound
+  #     messages: 5000
+
+# Outbound source-IP rotation. With no addresses verta sends from the OS
+# default source and server.hostname. strategy:
+#   recipient_domain  same destination always from the same IP (default,
+#                     best for reputation and warm-up)
+#   sender_domain     each hosted domain from its own IP (see 'domains')
+#   round_robin       next IP per message
+# On a plain host 'bind' is the public address (omit it). Inside an LXD
+# container set 'bind' to the internal bridge IP the host SNATs to
+# 'address'; 'address' is the public IP (its PTR, and what every hosted
+# domain's SPF must list). 'helo' should match the IP's reverse DNS.
+egress:
+  strategy: recipient_domain
+  addresses: []
+  #   - address: 203.0.113.10
+  #     helo: mail1.example.com
+  #     bind: 10.1.0.20             # LXD internal IP; omit on a plain host
+  #   - address: 203.0.113.11
+  #     helo: mail2.example.com
+  #     bind: 10.1.0.21
+  #     domains: [clientea.com]     # only for strategy: sender_domain
 
 # Hosted domains live in one file per domain under this directory,
 # never in this file: adding a customer, changing a mailbox password

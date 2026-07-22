@@ -15,6 +15,7 @@ import (
 
 	"github.com/ostap-mykhaylyak/verta/internal/auth"
 	"github.com/ostap-mykhaylyak/verta/internal/filter"
+	"github.com/ostap-mykhaylyak/verta/internal/ratelimit"
 	"github.com/ostap-mykhaylyak/verta/internal/routing"
 )
 
@@ -422,6 +423,17 @@ func (s *session) cmdRcpt(arg string) {
 		}
 	}
 
+	// Custom per-dimension limits (per recipient, recipient domain,
+	// sender, sender domain, IP). Checked for every recipient, local or
+	// relayed, before the recipient is accepted.
+	if ok, dim := set.Governor.RcptAllowed(s.direction(), s.limitValues(addr, domain)); !ok {
+		s.srv.log.Warn("recipient rate limited by rule",
+			"event", "ratelimit_rule", "protocol", "smtp", "ip", s.ip,
+			"dimension", dim, "rcpt", addr, "action", "reject_rcpt")
+		s.reply("452 4.4.5 recipient rate limit exceeded, try again later")
+		return
+	}
+
 	if !local {
 		// Remote recipient on submission: relay via the queue.
 		s.rcpts = append(s.rcpts, rcpt{addr: addr, remote: true})
@@ -467,6 +479,16 @@ func (s *session) cmdData() (quit bool) {
 			s.reply("450 4.7.1 " + reason)
 			return false
 		}
+	}
+	// Custom per-dimension message limits (per recipient/recipient
+	// domain: one message token per distinct destination; per
+	// sender/IP: one per message).
+	if ok, dim := set.Governor.MsgAllowed(s.direction(), s.limitValues("", ""), s.rcptAddrs(), splitRcptAddr); !ok {
+		s.srv.log.Warn("message rate limited by rule",
+			"event", "ratelimit_rule", "protocol", "smtp", "ip", s.ip,
+			"dimension", dim, "action", "reject_message")
+		s.reply("452 4.4.5 message rate limit exceeded, try again later")
+		return false
 	}
 	if err := s.reply("354 end data with <CRLF>.<CRLF>"); err != nil {
 		return true
@@ -670,6 +692,48 @@ func (s *session) assemble(body, extra []byte) []byte {
 	fmt.Fprintf(&b, ";\r\n\t%s\r\n", time.Now().Format(time.RFC1123Z))
 	b.Write(body)
 	return b.Bytes()
+}
+
+// direction maps the listener mode to a rate-limit direction.
+func (s *session) direction() string {
+	if s.set().Mode == ModeSubmission {
+		return ratelimit.DirOutbound
+	}
+	return ratelimit.DirInbound
+}
+
+// limitValues gathers the attributes the custom rate-limit rules key on
+// for the current transaction and one recipient (rcptAddr/rcptDomain may
+// be empty at the message stage, where recipients are passed separately).
+func (s *session) limitValues(rcptAddr, rcptDomain string) ratelimit.Values {
+	sender := s.from
+	if s.authed != "" {
+		sender = s.authed
+	}
+	_, sdom, _ := splitAddr(sender)
+	return ratelimit.Values{
+		IP:              s.ip,
+		SenderMailbox:   sender,
+		SenderDomain:    sdom,
+		Recipient:       rcptAddr,
+		RecipientDomain: rcptDomain,
+	}
+}
+
+// rcptAddrs lists the transaction's recipient addresses.
+func (s *session) rcptAddrs() []string {
+	out := make([]string, len(s.rcpts))
+	for i, r := range s.rcpts {
+		out[i] = r.addr
+	}
+	return out
+}
+
+// splitRcptAddr returns a recipient's address and its domain, the shape
+// the governor's message check expects.
+func splitRcptAddr(r string) (addr, domain string) {
+	_, d, _ := splitAddr(r)
+	return r, d
 }
 
 // splitAddr separates local part and lowercased domain.

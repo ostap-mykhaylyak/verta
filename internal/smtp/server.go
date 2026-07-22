@@ -61,6 +61,9 @@ type Settings struct {
 	// OutLimits is the per-user outbound limiter set (submission);
 	// nil disables it.
 	OutLimits *ratelimit.Outbound
+	// Governor holds the custom per-dimension rate-limit rules (per
+	// domain, mailbox, recipient, recipient domain). nil disables them.
+	Governor *ratelimit.Governor
 	// Identity keeps internal addresses out of the trace headers of
 	// mail that leaves the server (containerized deployments).
 	Identity container.Identity

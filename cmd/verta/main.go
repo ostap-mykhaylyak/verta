@@ -45,6 +45,7 @@ import (
 	"github.com/ostap-mykhaylyak/verta/internal/config"
 	"github.com/ostap-mykhaylyak/verta/internal/container"
 	"github.com/ostap-mykhaylyak/verta/internal/dkim"
+	"github.com/ostap-mykhaylyak/verta/internal/egress"
 	"github.com/ostap-mykhaylyak/verta/internal/imap"
 	"github.com/ostap-mykhaylyak/verta/internal/logging"
 	"github.com/ostap-mykhaylyak/verta/internal/mailauth"
@@ -477,6 +478,16 @@ func runDaemon(cfgPath, pidfile, sockPath string) (err error) {
 		return err
 	}
 	transport := &queue.SMTPTransport{Hostname: cfg.Server.Hostname}
+	// Outbound source-IP rotation, when a pool is configured.
+	if pool := egressPool(cfg); pool != nil {
+		transport.Source = func(from, rcptDomain string) (bind, helo string) {
+			s := pool.Select(from, rcptDomain)
+			return s.Bind, s.HELO
+		}
+		logs.Service.Info("outbound IP rotation enabled",
+			"event", "egress_pool", "strategy", cfg.Egress.Strategy,
+			"addresses", len(cfg.Egress.Addresses))
+	}
 	bounceFn := func(e *queue.Envelope, reason string) {
 		// A hard bounce is reputation-relevant: it is the clearest
 		// signal that a sender is mailing addresses it should not.
@@ -1031,6 +1042,25 @@ func runDaemon(cfgPath, pidfile, sockPath string) (err error) {
 type limitSet struct {
 	in  *ratelimit.Inbound
 	out *ratelimit.Outbound
+	gov *ratelimit.Governor
+}
+
+// egressPool builds the outbound source-IP pool from config, or nil when
+// none is configured. An address without a public address is skipped.
+func egressPool(cfg *config.Config) *egress.Pool {
+	var addrs []egress.Address
+	for _, a := range cfg.Egress.Addresses {
+		if a.Address == "" {
+			continue
+		}
+		addrs = append(addrs, egress.Address{
+			Public:  a.Address,
+			HELO:    a.HELO,
+			Bind:    a.Bind,
+			Domains: a.Domains,
+		})
+	}
+	return egress.New(cfg.Egress.Strategy, addrs)
 }
 
 // newLimits builds the limiters from the current config (fresh
@@ -1044,6 +1074,7 @@ func newLimits(cfg *config.Config) limitSet {
 	if out := cfg.RateLimit.Outbound; out.IsEnabled() {
 		l.out = ratelimit.NewOutbound(out.User.MessagesPerHour, out.User.RecipientsPerHour)
 	}
+	l.gov = ratelimit.NewGovernor(cfg.GovernorRules())
 	return l
 }
 
@@ -1059,6 +1090,7 @@ func smtpSettings(cfg *config.Config, store *ktls.Store, mode smtp.Mode, implici
 		ImplicitTLS:   implicit,
 		Limits:        lim.in,
 		OutLimits:     lim.out,
+		Governor:      lim.gov,
 		Stats:         counters,
 		Identity: container.Identity{
 			Enabled:    cfg.Container.Enabled,

@@ -26,6 +26,10 @@ type SMTPTransport struct {
 	LookupMX func(domain string) ([]string, error)
 	// Timeout bounds dial and per-command waits.
 	Timeout time.Duration
+	// Source selects the outbound IP to bind and the EHLO name to
+	// announce for one envelope (from, recipient domain). nil means the
+	// OS default source and Hostname — no rotation.
+	Source func(from, rcptDomain string) (bind, helo string)
 }
 
 func (t *SMTPTransport) port() int {
@@ -92,7 +96,22 @@ func (t *SMTPTransport) Deliver(e *Envelope) error {
 
 // trySend runs one SMTP transaction against one host.
 func (t *SMTPTransport) trySend(host string, e *Envelope) error {
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, fmt.Sprint(t.port())), t.timeout())
+	// Pick the outbound source (IP to bind, EHLO name) for this envelope.
+	ehlo := t.Hostname
+	dialer := net.Dialer{Timeout: t.timeout()}
+	if t.Source != nil {
+		bind, helo := t.Source(e.From, e.Domain)
+		if helo != "" {
+			ehlo = helo
+		}
+		if bind != "" {
+			if ip := net.ParseIP(bind); ip != nil {
+				dialer.LocalAddr = &net.TCPAddr{IP: ip}
+			}
+		}
+	}
+
+	conn, err := dialer.Dial("tcp", net.JoinHostPort(host, fmt.Sprint(t.port())))
 	if err != nil {
 		return err
 	}
@@ -105,7 +124,7 @@ func (t *SMTPTransport) trySend(host string, e *Envelope) error {
 	}
 	defer c.Close()
 
-	if err := c.Hello(t.Hostname); err != nil {
+	if err := c.Hello(ehlo); err != nil {
 		return classify(err)
 	}
 	if ok, _ := c.Extension("STARTTLS"); ok {

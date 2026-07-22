@@ -29,6 +29,7 @@ servers, VPS and LXD/LXC containers.
 - [Antivirus](#antivirus)
 - [Blacklists](#blacklists)
 - [Rate limiting](#rate-limiting)
+- [Outbound IP rotation](#outbound-ip-rotation)
 - [Reputation and warm-up](#reputation-and-warm-up)
 - [Administrative API](#administrative-api)
 - [Running in a container](#running-in-a-container)
@@ -67,7 +68,7 @@ Download the bundle for your architecture, unpack it and let the
 binary provision the system:
 
 ```sh
-curl -LO https://github.com/ostap-mykhaylyak/verta/releases/download/v0.2.0/verta-v0.2.0-linux-amd64.tar.gz
+curl -LO https://github.com/ostap-mykhaylyak/verta/releases/download/v0.3.0/verta-v0.3.0-linux-amd64.tar.gz
 tar xzf verta-*.tar.gz && cd verta-*
 sudo ./verta --init
 sudo systemctl daemon-reload
@@ -83,7 +84,7 @@ systemd unit. It never overwrites an existing configuration, so
 **running it again from a newer bundle is the upgrade path**:
 
 ```sh
-tar xzf verta-v0.2.0-linux-amd64.tar.gz && cd verta-v0.2.0-linux-amd64
+tar xzf verta-v0.3.0-linux-amd64.tar.gz && cd verta-v0.3.0-linux-amd64
 sudo ./verta --init            # replaces the binary, keeps your config
 sudo systemctl restart verta
 ```
@@ -680,6 +681,99 @@ work, but the damage is bounded, and the event is logged.
 Either can be disabled explicitly with `enabled: false`, which
 `verta --audit` reports as a failure.
 
+### Custom rules
+
+Layered on top of the two built-ins, `rate_limit.rules` keys a token
+bucket on any transaction **dimension**, so a limit can apply per
+recipient, per recipient domain, per sender mailbox, per sender domain
+or per IP:
+
+```yaml
+rate_limit:
+  # ...inbound / outbound above...
+  rules:
+    - by: recipient_domain     # don't hammer any one destination
+      messages: 200            # whole messages…
+      window: 1h               # …per this window (Go duration; default 1h)
+    - by: recipient_domain     # …but allow more to Gmail (override)
+      match: gmail.com
+      messages: 1000
+    - by: recipient            # protect a mailbox from a bombing run
+      direction: inbound
+      recipients: 100          # count RCPTs, not messages
+    - by: sender_mailbox       # a trusted bulk sender gets more headroom
+      match: newsletter@example.com
+      direction: outbound
+      messages: 5000
+```
+
+| Field | Meaning |
+|---|---|
+| `by` | dimension: `ip`, `sender_domain`, `sender_mailbox`, `recipient`, `recipient_domain` |
+| `match` | pin the rule to one value — an **override** that replaces the generic limit for it; omit for a generic rule (one bucket per distinct value) |
+| `direction` | `inbound` or `outbound`; omit for both |
+| `window` | Go duration (`1h`, `10m`, `30s`); default `1h` |
+| `messages` | whole-message budget (a message to several recipients in one domain counts once per domain) |
+| `recipients` | RCPT budget (each recipient counts) |
+
+Recipient dimensions are enforced at `RCPT`/`DATA` on both port 25 and
+submission; sender and IP dimensions likewise. A denied transaction gets
+`452` and is logged with the dimension that tripped. An invalid rule is a
+startup warning, not a fatal error.
+
+---
+
+## Outbound IP rotation
+
+A server with several public IPs — or several NAT'd addresses inside an
+LXD container — can spread its outbound mail across them and build
+per-IP reputation. With no `egress.addresses` the server sends from the
+OS default source and `server.hostname`.
+
+```yaml
+egress:
+  strategy: recipient_domain    # recipient_domain | sender_domain | round_robin
+  addresses:
+    - address: 203.0.113.10     # public IP: its PTR, and in every domain's SPF
+      helo: mail1.example.com   # EHLO name; should match this IP's reverse DNS
+      bind: 10.1.0.20           # local IP to bind (see LXD below); omit on a plain host
+    - address: 203.0.113.11
+      helo: mail2.example.com
+      bind: 10.1.0.21
+      domains: [clientea.com]   # only for strategy: sender_domain
+```
+
+**Strategies**
+
+| Strategy | Behaviour |
+|---|---|
+| `recipient_domain` (default) | the same destination domain always leaves from the same IP (sticky by hash) — best for reputation and warm-up |
+| `sender_domain` | each hosted domain leaves from its mapped IP (`domains:`); keeps tenants' reputations separate |
+| `round_robin` | the next IP in sequence, per message |
+
+**On a plain host** each public IP is bound directly — leave `bind`
+empty (it defaults to `address`).
+
+**Inside an LXD container** the container does not hold the public IPs;
+the host does, and NATs each one to an internal bridge address. So set
+`bind` to the **internal** address (what verta binds) and `address` to
+the **public** IP (what the world sees, used for the EHLO/PTR/SPF). On
+the host, one SNAT rule per pair, e.g.:
+
+```sh
+# host: map each internal container IP to its public IP for outbound 25
+iptables -t nat -A POSTROUTING -s 10.1.0.20 -p tcp --dport 25 -j SNAT --to-source 203.0.113.10
+iptables -t nat -A POSTROUTING -s 10.1.0.21 -p tcp --dport 25 -j SNAT --to-source 203.0.113.11
+```
+
+**Deliverability.** For each IP: publish a **PTR** matching its `helo`,
+and add the IP to **every hosted domain's SPF**
+(`v=spf1 ip4:203.0.113.10 ip4:203.0.113.11 -all`). Forwarded mail uses
+[SRS](#aliases-forwarding-and-filters), so the SPF that matters at the
+destination is the forwarding domain's — list these IPs there too.
+
+Changing the pool takes effect on restart.
+
 ---
 
 ## Reputation and warm-up
@@ -814,7 +908,7 @@ Rotation is delegated to logrotate; `SIGHUP` reopens the files.
 `verta --status` asks the running daemon what it is doing:
 
 ```
-verta v0.2.0  mail.example.com
+verta v0.3.0  mail.example.com
   pid 2841, up 6d3h12m
 
 Listeners

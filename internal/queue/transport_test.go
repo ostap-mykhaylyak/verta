@@ -75,6 +75,57 @@ func TestTransportDeliversToRealServer(t *testing.T) {
 	}
 }
 
+// When a Source is configured, the transport announces that source's
+// EHLO name and binds its local IP. The destination records the EHLO in
+// its Received header, which is what we assert.
+func TestTransportUsesEgressSource(t *testing.T) {
+	root := t.TempDir()
+	backend := smtp.Backend{
+		IsLocalDomain: func(d string) bool { return d == "remote.org" },
+		Route: func(email string) (routing.Plan, bool) {
+			mb := storage.Mailbox{Email: email, Dir: filepath.Join(root, "friend"), UID: -1, GID: -1}
+			return routing.Plan{Local: []routing.Local{{Mailbox: mb}}, Found: true}, true
+		},
+		Store: func(mb storage.Mailbox, from, folder string, seen, flagged bool, msg []byte) error {
+			_, err := maildir.Deliver(mb.Dir, msg, mb.UID, mb.GID)
+			return err
+		},
+		Postmaster: func() string { return "" },
+	}
+	srv := smtp.New(smtp.Settings{Hostname: "mx.remote.org", MaxSize: 1 << 20, MaxRecipients: 10},
+		backend, 4, quietLog())
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Shutdown(2 * time.Second) })
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+
+	q, _ := Open(t.TempDir())
+	q.Enqueue("sender@here.it", "friend@remote.org", []byte("Subject: s\r\n\r\nx\r\n"))
+	tr := &SMTPTransport{
+		Hostname: "default.here.it",
+		Port:     atoi(port),
+		LookupMX: func(string) ([]string, error) { return []string{"127.0.0.1"}, nil },
+		Timeout:  5 * time.Second,
+		Source: func(from, rcptDomain string) (bind, helo string) {
+			return "127.0.0.1", "mail7.here.it" // bind loopback, custom EHLO
+		},
+	}
+	s := NewScheduler(q, tr, func(e *Envelope, r string) { t.Errorf("unexpected bounce: %s", r) }, 3, quietLog())
+	s.Process(time.Now())
+
+	ents, err := os.ReadDir(filepath.Join(root, "friend", "new"))
+	if err != nil || len(ents) != 1 {
+		t.Fatalf("message not delivered: %v (%v)", ents, err)
+	}
+	msg, _ := os.ReadFile(filepath.Join(root, "friend", "new", ents[0].Name()))
+	if !strings.Contains(string(msg), "from mail7.here.it") {
+		t.Errorf("Received should carry the source EHLO name:\n%s", msg)
+	}
+}
+
 // TestTransportPermanentFromServer maps a 550 from the remote server
 // to a PermanentError (bounce, no retry).
 func TestTransportPermanentFromServer(t *testing.T) {

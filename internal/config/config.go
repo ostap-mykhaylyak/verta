@@ -18,6 +18,7 @@ import (
 	"github.com/ostap-mykhaylyak/verta/internal/blacklist"
 	"github.com/ostap-mykhaylyak/verta/internal/filter"
 	"github.com/ostap-mykhaylyak/verta/internal/paths"
+	"github.com/ostap-mykhaylyak/verta/internal/ratelimit"
 	"gopkg.in/yaml.v3"
 )
 
@@ -47,6 +48,7 @@ type Config struct {
 	Container  Container  `yaml:"container"`
 	RateLimit  RateLimit  `yaml:"rate_limit"`
 	Forwarding Forwarding `yaml:"forwarding"`
+	Egress     Egress     `yaml:"egress"`
 	// DomainsDir holds one file per hosted domain. Domains are kept
 	// out of this file so a provisioning script can add or remove one
 	// without rewriting the server configuration.
@@ -63,6 +65,9 @@ type Config struct {
 
 	// Warnings collects non-fatal findings from validation.
 	Warnings []string `yaml:"-"`
+
+	// govRules is RateLimit.Rules compiled and validated at load time.
+	govRules []ratelimit.GovRule
 }
 
 // Server holds global daemon settings.
@@ -238,10 +243,55 @@ type Container struct {
 	InternalIP string `yaml:"internal_ip"`
 }
 
+// Egress configures outbound source-IP rotation. With no addresses the
+// server sends from the OS default source and server.hostname.
+type Egress struct {
+	// Strategy is recipient_domain (default), sender_domain or
+	// round_robin.
+	Strategy string `yaml:"strategy"`
+	// Addresses is the pool of outbound source IPs.
+	Addresses []EgressAddress `yaml:"addresses"`
+}
+
+// EgressAddress is one outbound source IP.
+type EgressAddress struct {
+	// Address is the public IP (its PTR, what the domains' SPF lists).
+	Address string `yaml:"address"`
+	// HELO is the EHLO name for this IP; should match its reverse DNS.
+	HELO string `yaml:"helo"`
+	// Bind is the local IP to bind. Empty binds Address (plain host);
+	// set it to the container's internal bridge IP that the host SNATs
+	// to Address.
+	Bind string `yaml:"bind"`
+	// Domains routes these hosted sender domains here (sender_domain
+	// strategy).
+	Domains []string `yaml:"domains"`
+}
+
 // RateLimit configures the flood protections.
 type RateLimit struct {
 	Inbound  Inbound  `yaml:"inbound"`
 	Outbound Outbound `yaml:"outbound"`
+	// Rules are custom per-dimension limits layered on top of the
+	// built-in per-IP (inbound) and per-user (outbound) caps.
+	Rules []RateLimitRule `yaml:"rules"`
+}
+
+// RateLimitRule is one custom limit. `by` selects the dimension the
+// bucket is keyed on: ip, sender_domain, sender_mailbox, recipient or
+// recipient_domain. `match` restricts the rule to one specific value of
+// that dimension (an override that replaces the generic limit for it);
+// omit it for a generic rule that gives every value its own bucket.
+// `direction` (inbound|outbound) scopes the rule to one listener kind;
+// omit for both. `window` is a Go duration (default 1h). A zero
+// `messages` or `recipients` leaves that counter unlimited.
+type RateLimitRule struct {
+	By         string `yaml:"by"`
+	Match      string `yaml:"match"`
+	Direction  string `yaml:"direction"`
+	Window     string `yaml:"window"`
+	Messages   int    `yaml:"messages"`
+	Recipients int    `yaml:"recipients"`
 }
 
 // Outbound protects against compromised accounts: per-user sending
@@ -479,6 +529,7 @@ func Load(path string) (*Config, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	cfg.compileRateLimitRules()
 	return cfg, nil
 }
 
