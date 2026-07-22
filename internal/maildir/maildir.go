@@ -58,6 +58,14 @@ func sanitizeHost(h string) string {
 // cur/new/tmp layout on first use. uid/gid < 0 means no ownership
 // change. It returns the final path under new/.
 func Deliver(dir string, msg []byte, uid, gid int) (string, error) {
+	return DeliverWithFlags(dir, msg, nil, uid, gid)
+}
+
+// DeliverWithFlags is Deliver with initial flags: a message delivered
+// with any flag (e.g. \Seen from a filter that marks mail read, or
+// \Flagged for "important") lands in cur/ carrying those flags rather
+// than in new/ as Recent. With no flags it is identical to Deliver.
+func DeliverWithFlags(dir string, msg []byte, flags Flags, uid, gid int) (string, error) {
 	for _, sub := range []string{"", "tmp", "new", "cur"} {
 		p := filepath.Join(dir, sub)
 		if err := os.MkdirAll(p, 0o700); err != nil {
@@ -66,11 +74,11 @@ func Deliver(dir string, msg []byte, uid, gid int) (string, error) {
 		chown(p, uid, gid)
 	}
 
-	name := fmt.Sprintf("%d.M%dP%dQ%dR%x.%s",
+	base := fmt.Sprintf("%d.M%dP%dQ%dR%x.%s",
 		time.Now().Unix(), time.Now().Nanosecond()/1000, os.Getpid(),
 		seq.Add(1), rand.Uint32(), host())
 
-	tmp := filepath.Join(dir, "tmp", name)
+	tmp := filepath.Join(dir, "tmp", base)
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return "", fmt.Errorf("maildir %s: %w", dir, err)
@@ -87,7 +95,13 @@ func Deliver(dir string, msg []byte, uid, gid int) (string, error) {
 	}
 	chown(tmp, uid, gid)
 
-	final := filepath.Join(dir, "new", name)
+	// A flagged message is no longer "new": it belongs in cur/ with its
+	// flags encoded in the filename.
+	sub, name := "new", base
+	if len(flags) > 0 {
+		sub, name = "cur", FileName(base, flags)
+	}
+	final := filepath.Join(dir, sub, name)
 	if err := os.Rename(tmp, final); err != nil {
 		os.Remove(tmp)
 		return "", fmt.Errorf("maildir %s: %w", dir, err)

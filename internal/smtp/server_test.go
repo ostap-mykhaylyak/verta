@@ -19,6 +19,7 @@ import (
 
 	"github.com/ostap-mykhaylyak/verta/internal/maildir"
 	"github.com/ostap-mykhaylyak/verta/internal/ratelimit"
+	"github.com/ostap-mykhaylyak/verta/internal/routing"
 	"github.com/ostap-mykhaylyak/verta/internal/storage"
 )
 
@@ -35,21 +36,8 @@ func testServer(t *testing.T, mailRoot string, mutate func(*Settings)) string {
 	}
 	backend := Backend{
 		IsLocalDomain: func(d string) bool { return d == "example.com" },
-		Lookup: func(email string) (storage.Mailbox, bool) {
-			if email == "admin@example.com" {
-				return storage.Mailbox{Email: email, Dir: filepath.Join(mailRoot, "admin"), UID: -1, GID: -1}, true
-			}
-			return storage.Mailbox{}, false
-		},
-		Deliver: func(mb storage.Mailbox, from string, spam bool, msg []byte) error {
-			dir := mb.Dir
-			if spam {
-				dir = filepath.Join(dir, ".Spam")
-			}
-			full := append([]byte("Return-Path: <"+from+">\r\n"), msg...)
-			_, err := maildir.Deliver(dir, full, mb.UID, mb.GID)
-			return err
-		},
+		Route:         routeAdmin(mailRoot),
+		Store:         storeToMaildir,
 		Postmaster: func() string { return "admin@example.com" },
 	}
 	srv := New(set, backend, 8, slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
@@ -60,6 +48,37 @@ func testServer(t *testing.T, mailRoot string, mutate func(*Settings)) string {
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Shutdown(2 * time.Second) })
 	return ln.Addr().String()
+}
+
+// routeAdmin is a test Route hook resolving admin@example.com to a
+// mailbox under mailRoot, and nothing else.
+func routeAdmin(mailRoot string) func(string) (routing.Plan, bool) {
+	return func(email string) (routing.Plan, bool) {
+		if email == "admin@example.com" {
+			mb := storage.Mailbox{Email: email, Dir: filepath.Join(mailRoot, "admin"), UID: -1, GID: -1}
+			return routing.Plan{Local: []routing.Local{{Mailbox: mb}}, Found: true}, true
+		}
+		return routing.Plan{}, false
+	}
+}
+
+// storeToMaildir is a test Store hook: it writes into the mailbox folder
+// with the given flags, prepending Return-Path like the real backend.
+func storeToMaildir(mb storage.Mailbox, from, folder string, seen, flagged bool, msg []byte) error {
+	dir := mb.Dir
+	if folder != "" {
+		dir = filepath.Join(dir, "."+folder)
+	}
+	var flags maildir.Flags
+	if seen {
+		flags = flags.Add(maildir.FlagSeen)
+	}
+	if flagged {
+		flags = flags.Add(maildir.FlagFlagged)
+	}
+	full := append([]byte("Return-Path: <"+from+">\r\n"), msg...)
+	_, err := maildir.DeliverWithFlags(dir, full, flags, mb.UID, mb.GID)
+	return err
 }
 
 // client is a minimal scripted SMTP client.

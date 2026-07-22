@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ostap-mykhaylyak/verta/internal/maildir"
-	"github.com/ostap-mykhaylyak/verta/internal/storage"
 )
 
 // screenServer starts an inbound server whose Screen hook returns a
@@ -20,22 +18,9 @@ func screenServer(t *testing.T, mailRoot string, verdict ScreenResult) (addr str
 	var captured []byte
 	backend := Backend{
 		IsLocalDomain: func(d string) bool { return d == "example.com" },
-		Lookup: func(email string) (storage.Mailbox, bool) {
-			if email == "admin@example.com" {
-				return storage.Mailbox{Email: email, Dir: filepath.Join(mailRoot, "admin"), UID: -1, GID: -1}, true
-			}
-			return storage.Mailbox{}, false
-		},
-		Deliver: func(mb storage.Mailbox, from string, spam bool, msg []byte) error {
-			dir := mb.Dir
-			if spam {
-				dir = filepath.Join(dir, ".Spam")
-			}
-			full := append([]byte("Return-Path: <"+from+">\r\n"), msg...)
-			_, err := maildir.Deliver(dir, full, mb.UID, mb.GID)
-			return err
-		},
-		Postmaster: func() string { return "admin@example.com" },
+		Route:         routeAdmin(mailRoot),
+		Store:         storeToMaildir,
+		Postmaster:    func() string { return "admin@example.com" },
 		Screen: func(ip, helo, from string, data []byte) ScreenResult {
 			captured = append([]byte(nil), data...)
 			return verdict

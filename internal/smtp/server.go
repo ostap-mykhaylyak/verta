@@ -26,6 +26,7 @@ import (
 
 	"github.com/ostap-mykhaylyak/verta/internal/container"
 	"github.com/ostap-mykhaylyak/verta/internal/ratelimit"
+	"github.com/ostap-mykhaylyak/verta/internal/routing"
 	"github.com/ostap-mykhaylyak/verta/internal/stats"
 	"github.com/ostap-mykhaylyak/verta/internal/storage"
 )
@@ -92,11 +93,19 @@ type ScreenResult struct {
 type Backend struct {
 	// IsLocalDomain reports whether domain is hosted here.
 	IsLocalDomain func(domain string) bool
-	// Lookup resolves a local address to its mailbox.
-	Lookup func(email string) (storage.Mailbox, bool)
-	// Deliver stores the message into a mailbox: from is the envelope
-	// sender (Return-Path), spam selects the quarantine folder.
-	Deliver func(mb storage.Mailbox, from string, spam bool, msg []byte) error
+	// Route resolves a local recipient into its delivery plan: the
+	// mailboxes it lands in (with their filters) and the external
+	// addresses it is forwarded to (aliases, catch-all, forwards). ok is
+	// false for an address that is not deliverable here.
+	Route func(email string) (routing.Plan, bool)
+	// Store writes the message into one mailbox folder ("" = INBOX,
+	// "Spam" = the junk folder) with optional initial flags. from is the
+	// envelope sender (Return-Path).
+	Store func(mb storage.Mailbox, from, folder string, seen, flagged bool, msg []byte) error
+	// Forward relays a copy to a remote address. forwardDomain is the
+	// local domain doing the forwarding, used to rewrite the envelope
+	// sender with SRS so the forward passes SPF at the destination.
+	Forward func(from, forwardDomain, rcpt string, msg []byte) error
 	// Postmaster returns the address behind a bare RCPT
 	// TO:<postmaster>, or "" when none is configured.
 	Postmaster func() string

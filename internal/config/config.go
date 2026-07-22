@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/ostap-mykhaylyak/verta/internal/blacklist"
+	"github.com/ostap-mykhaylyak/verta/internal/filter"
 	"github.com/ostap-mykhaylyak/verta/internal/paths"
 	"gopkg.in/yaml.v3"
 )
@@ -45,6 +46,7 @@ type Config struct {
 	Reputation Reputation `yaml:"reputation"`
 	Container  Container  `yaml:"container"`
 	RateLimit  RateLimit  `yaml:"rate_limit"`
+	Forwarding Forwarding `yaml:"forwarding"`
 	// DomainsDir holds one file per hosted domain. Domains are kept
 	// out of this file so a provisioning script can add or remove one
 	// without rewriting the server configuration.
@@ -281,6 +283,13 @@ type Domain struct {
 	Storage Storage `yaml:"storage"`
 	// DKIMSelector names the signing key; empty means "default".
 	DKIMSelector string `yaml:"dkim_selector"`
+	// Aliases map a local part (the key) to one or more targets, which
+	// may be local mailboxes or external addresses (an off-server target
+	// is a forward). Assembled from the domain file.
+	Aliases map[string]Targets `yaml:"-"`
+	// CatchAll receives any address in the domain that matches neither a
+	// mailbox nor an alias. Empty means unknown addresses are rejected.
+	CatchAll Targets `yaml:"-"`
 }
 
 // DKIMSelectorFor returns the configured selector of a domain.
@@ -322,6 +331,15 @@ type User struct {
 	// PasswordHash authenticates the user for submission (argon2id
 	// or bcrypt, never cleartext). Empty means no submission.
 	PasswordHash string `yaml:"password_hash"`
+	// ForwardTo sends a copy of every delivered message to these
+	// addresses (local or external). External targets go out through
+	// SRS + the relay queue.
+	ForwardTo Targets `yaml:"forward_to"`
+	// KeepLocal decides whether a forwarding mailbox still stores the
+	// message. nil (unset) means keep — see KeepsLocalCopy.
+	KeepLocal *bool `yaml:"keep_local"`
+	// Filters are evaluated in order on local delivery.
+	Filters []filter.Rule `yaml:"filters"`
 }
 
 // PasswordHashFor returns the stored hash for an address, across

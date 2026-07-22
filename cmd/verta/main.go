@@ -55,7 +55,9 @@ import (
 	"github.com/ostap-mykhaylyak/verta/internal/queue"
 	"github.com/ostap-mykhaylyak/verta/internal/ratelimit"
 	"github.com/ostap-mykhaylyak/verta/internal/reputation"
+	"github.com/ostap-mykhaylyak/verta/internal/routing"
 	"github.com/ostap-mykhaylyak/verta/internal/smtp"
+	"github.com/ostap-mykhaylyak/verta/internal/srs"
 	"github.com/ostap-mykhaylyak/verta/internal/stats"
 	kstatus "github.com/ostap-mykhaylyak/verta/internal/status"
 	"github.com/ostap-mykhaylyak/verta/internal/storage"
@@ -537,17 +539,33 @@ func runDaemon(cfgPath, pidfile, sockPath string) (err error) {
 
 	backend := smtp.Backend{
 		IsLocalDomain: func(d string) bool { return mgr.Get().HasDomain(d) },
-		Lookup: func(email string) (storage.Mailbox, bool) {
-			return storage.Resolve(mgr.Get(), email)
+		Route: func(email string) (routing.Plan, bool) {
+			cfg := mgr.Get()
+			p := routing.Resolve(cfg, cfg.Forwarding.SRSSecret, email)
+			return p, p.Found
 		},
-		Deliver: func(mb storage.Mailbox, from string, spam bool, msg []byte) error {
+		Store: func(mb storage.Mailbox, from, folder string, seen, flagged bool, msg []byte) error {
 			dir := mb.Dir
-			if spam {
-				dir = filepath.Join(dir, ".Spam") // Maildir++ quarantine
+			if folder != "" {
+				dir = filepath.Join(dir, "."+folder) // Maildir++ subfolder (".Spam", ".Newsletters", ...)
+			}
+			var flags maildir.Flags
+			if seen {
+				flags = flags.Add(maildir.FlagSeen)
+			}
+			if flagged {
+				flags = flags.Add(maildir.FlagFlagged)
 			}
 			full := append([]byte("Return-Path: <"+from+">\r\n"), msg...)
-			_, err := maildir.Deliver(dir, full, mb.UID, mb.GID)
+			_, err := maildir.DeliverWithFlags(dir, full, flags, mb.UID, mb.GID)
 			return err
+		},
+		Forward: func(from, forwardDomain, rcpt string, msg []byte) error {
+			sender := from
+			if secret := mgr.Get().Forwarding.SRSSecret; secret != "" && from != "" {
+				sender = srs.Forward(secret, forwardDomain, from)
+			}
+			return q.Enqueue(sender, rcpt, msg)
 		},
 		Postmaster: func() string {
 			if doms := mgr.Get().Domains; len(doms) > 0 {

@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/ostap-mykhaylyak/verta/internal/auth"
-	"github.com/ostap-mykhaylyak/verta/internal/maildir"
 	"github.com/ostap-mykhaylyak/verta/internal/ratelimit"
+	"github.com/ostap-mykhaylyak/verta/internal/routing"
 	"github.com/ostap-mykhaylyak/verta/internal/storage"
 )
 
@@ -65,17 +65,9 @@ func submissionServer(t *testing.T, mailRoot string, mutate func(*Settings)) (ad
 	enq = &enqueueLog{}
 	backend := Backend{
 		IsLocalDomain: func(d string) bool { return d == "example.com" },
-		Lookup: func(email string) (storage.Mailbox, bool) {
-			if email == "admin@example.com" {
-				return storage.Mailbox{Email: email, Dir: filepath.Join(mailRoot, "admin"), UID: -1, GID: -1}, true
-			}
-			return storage.Mailbox{}, false
-		},
-		Deliver: func(mb storage.Mailbox, from string, spam bool, msg []byte) error {
-			_, err := maildir.Deliver(mb.Dir, msg, mb.UID, mb.GID)
-			return err
-		},
-		Postmaster:   func() string { return "admin@example.com" },
+		Route:         routeAdmin(mailRoot),
+		Store:         storeToMaildir,
+		Postmaster:    func() string { return "admin@example.com" },
 		Authenticate: authr.Verify,
 		Enqueue: func(from, rcpt string, data []byte) error {
 			enq.add(rcpt)
@@ -248,8 +240,8 @@ func TestAuthRefusedWithoutTLS(t *testing.T) {
 	}
 	backend := Backend{
 		IsLocalDomain: func(string) bool { return false },
-		Lookup:        func(string) (storage.Mailbox, bool) { return storage.Mailbox{}, false },
-		Deliver:       func(storage.Mailbox, string, bool, []byte) error { return nil },
+		Route:         func(string) (routing.Plan, bool) { return routing.Plan{}, false },
+		Store:         func(storage.Mailbox, string, string, bool, bool, []byte) error { return nil },
 		Postmaster:    func() string { return "" },
 		Authenticate:  authr.Verify,
 		Enqueue:       func(string, string, []byte) error { return nil },

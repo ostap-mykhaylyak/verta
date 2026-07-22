@@ -45,6 +45,36 @@ users:
     maildir: /var/mail/example.com/admin
     # password_hash: "$argon2id$v=19$m=65536,t=3,p=4$..."
 
+    # Forward a copy of every message to another address. A local copy is
+    # kept by default; set keep_local: false to forward only. External
+    # targets go out through SRS so they pass SPF at the destination.
+    # forward_to: [backup@gmail.com]
+    # keep_local: true
+
+    # Delivery filters, evaluated in order. Conditions (from/to/subject/
+    # header/larger_than) are ANDed; the first matching rule with
+    # stop: true ends evaluation.
+    # filters:
+    #   - from: "newsletter@"
+    #     folder: Newsletters
+    #     stop: true
+    #   - subject: "[URGENT]"
+    #     flagged: true
+    #   - from: spam@spammer.tld
+    #     discard: true
+
   # - email: info@example.com
   #   maildir: /var/mail/example.com/info
   #   password_hash: "$argon2id$..."
+
+# Aliases: a local part maps to one or more targets. A target may be a
+# local mailbox (delivery), several (a distribution list), or an external
+# address (a forward, sent through SRS).
+# aliases:
+#   info: admin@example.com
+#   sales: [admin@example.com, info@example.com]
+#   webmaster: someone@external.com
+
+# Catch-all: any address in this domain that matches neither a mailbox
+# nor an alias lands here. Leave unset to reject unknown addresses.
+# catch_all: admin@example.com

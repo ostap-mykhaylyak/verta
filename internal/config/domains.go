@@ -27,6 +27,12 @@ type DomainFile struct {
 	Storage Storage `yaml:"storage"`
 	// Users are the virtual mailboxes of this domain.
 	Users []User `yaml:"users"`
+	// Aliases map a local part to one or more targets (local mailboxes
+	// or external addresses).
+	Aliases map[string]Targets `yaml:"aliases"`
+	// CatchAll receives every address in the domain that matches no
+	// mailbox and no alias. Empty rejects unknown addresses.
+	CatchAll Targets `yaml:"catch_all"`
 
 	// path is where the file was read from, for error messages.
 	path string
@@ -80,6 +86,8 @@ func (c *Config) loadDomains(dir string) error {
 			Name:         df.Name,
 			Storage:      df.Storage,
 			DKIMSelector: df.DKIMSelector,
+			Aliases:      normalizeAliases(df.Aliases),
+			CatchAll:     df.CatchAll,
 		})
 		c.Users = append(c.Users, df.Users...)
 	}

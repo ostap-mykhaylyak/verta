@@ -73,6 +73,15 @@ queue:
   dir: /var/lib/verta/queue
   max_attempts: 10
 
+# Forwarding (aliases and mailboxes that point off-server). srs_secret
+# keys the Sender Rewriting Scheme so a forwarded message passes SPF at
+# the destination and its bounces return here to be decoded. `verta
+# --init` generates one; keep it stable, and identical across a cluster.
+# Empty disables SRS (forwards keep the original sender and may be
+# rejected as spoofing).
+forwarding:
+  srs_secret: ""
+
 # DKIM signing keys, one per domain: <dir>/<domain>/<selector>.pem.
 # Create them with `verta generate-dkim <domain>`.
 dkim:

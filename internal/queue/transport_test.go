@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ostap-mykhaylyak/verta/internal/maildir"
+	"github.com/ostap-mykhaylyak/verta/internal/routing"
 	"github.com/ostap-mykhaylyak/verta/internal/smtp"
 	"github.com/ostap-mykhaylyak/verta/internal/storage"
 )
@@ -23,13 +24,14 @@ func TestTransportDeliversToRealServer(t *testing.T) {
 	// Destination: an inbound verta server for remote.org.
 	backend := smtp.Backend{
 		IsLocalDomain: func(d string) bool { return d == "remote.org" },
-		Lookup: func(email string) (storage.Mailbox, bool) {
+		Route: func(email string) (routing.Plan, bool) {
 			if email == "friend@remote.org" {
-				return storage.Mailbox{Email: email, Dir: filepath.Join(root, "friend"), UID: -1, GID: -1}, true
+				mb := storage.Mailbox{Email: email, Dir: filepath.Join(root, "friend"), UID: -1, GID: -1}
+				return routing.Plan{Local: []routing.Local{{Mailbox: mb}}, Found: true}, true
 			}
-			return storage.Mailbox{}, false
+			return routing.Plan{}, false
 		},
-		Deliver: func(mb storage.Mailbox, from string, spam bool, msg []byte) error {
+		Store: func(mb storage.Mailbox, from, folder string, seen, flagged bool, msg []byte) error {
 			_, err := maildir.Deliver(mb.Dir, msg, mb.UID, mb.GID)
 			return err
 		},
@@ -78,8 +80,8 @@ func TestTransportDeliversToRealServer(t *testing.T) {
 func TestTransportPermanentFromServer(t *testing.T) {
 	backend := smtp.Backend{
 		IsLocalDomain: func(d string) bool { return d == "remote.org" },
-		Lookup:        func(string) (storage.Mailbox, bool) { return storage.Mailbox{}, false },
-		Deliver:       func(storage.Mailbox, string, bool, []byte) error { return nil },
+		Route:         func(string) (routing.Plan, bool) { return routing.Plan{}, false },
+		Store:         func(storage.Mailbox, string, string, bool, bool, []byte) error { return nil },
 		Postmaster:    func() string { return "" },
 	}
 	srv := smtp.New(smtp.Settings{

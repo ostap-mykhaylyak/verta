@@ -6,7 +6,9 @@ package bootstrap
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
 	_ "embed"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +18,17 @@ import (
 
 	"github.com/ostap-mykhaylyak/verta/internal/paths"
 )
+
+// randomSecret returns a 32-byte hex secret for SRS. crypto/rand cannot
+// realistically fail here; if it ever did, a fixed non-empty fallback is
+// still better than silently disabling SRS with an empty secret.
+func randomSecret() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "verta-srs-set-a-real-secret-in-config"
+	}
+	return hex.EncodeToString(b)
+}
 
 //go:embed skel/etc/verta/config.yaml
 var defaultConfig []byte
@@ -109,7 +122,11 @@ func Init(version string, w io.Writer) error {
 		return err
 	}
 
-	if err := writeIfAbsent(w, paths.ConfigFile, defaultConfig, 0o640); err != nil {
+	// Fill in a fresh SRS secret so forwarding works out of the box. The
+	// secret must be stable (a bounce may return weeks later), so it is
+	// generated once here rather than at every start.
+	cfg := strings.Replace(string(defaultConfig), `srs_secret: ""`, `srs_secret: "`+randomSecret()+`"`, 1)
+	if err := writeIfAbsent(w, paths.ConfigFile, []byte(cfg), 0o640); err != nil {
 		return err
 	}
 	examplePath := filepath.Join(paths.DomainsDir, "example.com.yaml.example")

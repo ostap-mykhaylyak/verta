@@ -14,7 +14,8 @@ import (
 	"time"
 
 	"github.com/ostap-mykhaylyak/verta/internal/auth"
-	"github.com/ostap-mykhaylyak/verta/internal/storage"
+	"github.com/ostap-mykhaylyak/verta/internal/filter"
+	"github.com/ostap-mykhaylyak/verta/internal/routing"
 )
 
 const (
@@ -45,7 +46,8 @@ type session struct {
 type rcpt struct {
 	addr   string
 	remote bool // submission relay: enqueue instead of deliver
-	mb     storage.Mailbox
+	domain string // recipient domain, for the SRS forward-domain
+	plan   routing.Plan
 }
 
 func newSession(srv *Server, conn net.Conn, ip string) *session {
@@ -426,12 +428,12 @@ func (s *session) cmdRcpt(arg string) {
 		s.reply("250 2.1.5 OK")
 		return
 	}
-	mb, ok := s.srv.backend.Lookup(addr)
+	plan, ok := s.srv.backend.Route(addr)
 	if !ok {
 		s.reply("550 5.1.1 no such user here")
 		return
 	}
-	s.rcpts = append(s.rcpts, rcpt{addr: addr, mb: mb})
+	s.rcpts = append(s.rcpts, rcpt{addr: addr, domain: domain, plan: plan})
 	s.reply("250 2.1.5 OK")
 }
 
@@ -544,7 +546,7 @@ func (s *session) cmdData() (quit bool) {
 		if r.remote {
 			err = s.srv.backend.Enqueue(s.from, r.addr, msg)
 		} else {
-			err = s.srv.backend.Deliver(r.mb, s.from, spam, msg)
+			err = s.deliverPlan(r, spam, msg)
 		}
 		if err != nil {
 			s.srv.log.Error("delivery failed",
@@ -575,6 +577,61 @@ func (s *session) cmdData() (quit bool) {
 	s.resetTransaction()
 	s.reply("250 2.0.0 OK message accepted for delivery")
 	return false
+}
+
+// deliverPlan executes a routed local recipient: it stores the message
+// into each mailbox the address resolves to (applying that mailbox's
+// filters) and relays a copy to each forward target. It succeeds when at
+// least one destination accepted the message; a message a filter drops
+// on purpose counts as delivered, without a bounce.
+func (s *session) deliverPlan(r rcpt, spam bool, msg []byte) error {
+	delivered := false
+	var firstErr error
+
+	for _, l := range r.plan.Local {
+		out := filter.Apply(l.Filters, msg)
+		if out.Discard {
+			delivered = true // accepted and intentionally not stored
+			continue
+		}
+		folder := out.Folder
+		if spam || out.Junk {
+			folder = "Spam" // policy quarantine wins over a folder rule
+		}
+		if err := s.srv.backend.Store(l.Mailbox, s.from, folder, out.Seen, out.Flagged, msg); err != nil {
+			firstErr = err
+			continue
+		}
+		delivered = true
+		// Filter-driven forwards are best effort: the local copy is
+		// already stored, and the relay queue persists and retries.
+		for _, f := range out.Forward {
+			s.forward(r.domain, f, msg)
+		}
+	}
+
+	for _, rem := range r.plan.Remote {
+		if err := s.forward(r.domain, rem, msg); err != nil {
+			firstErr = err
+		} else {
+			delivered = true
+		}
+	}
+
+	if !delivered && firstErr != nil {
+		return firstErr
+	}
+	return nil
+}
+
+// forward relays one copy to a remote address, if a Forward hook is
+// wired. forwardDomain is the local domain doing the forwarding (the SRS
+// envelope-sender domain).
+func (s *session) forward(forwardDomain, rcpt string, msg []byte) error {
+	if s.srv.backend.Forward == nil {
+		return nil
+	}
+	return s.srv.backend.Forward(s.from, forwardDomain, rcpt, msg)
 }
 
 // assemble prepends the trace headers to the received body. Only the
