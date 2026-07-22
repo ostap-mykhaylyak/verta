@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ostap-mykhaylyak/verta/internal/pace"
+	"github.com/ostap-mykhaylyak/verta/internal/storage"
 )
 
 // PermanentError is a definitive SMTP failure (5xx): no retry, the
@@ -20,10 +21,11 @@ func (e *PermanentError) Error() string {
 	return fmt.Sprintf("permanent failure %d: %s", e.Code, e.Msg)
 }
 
-// Transport delivers one envelope to its destination. A nil return
+// Transport delivers one envelope to its destination from the given
+// source (bind IP and EHLO name, empty for the defaults). A nil return
 // means delivered; a *PermanentError bounces; anything else retries.
 type Transport interface {
-	Deliver(e *Envelope) error
+	Deliver(e *Envelope, bind, helo string) error
 }
 
 // Counters is the subset of stats the scheduler updates. A nil
@@ -46,14 +48,21 @@ type Scheduler struct {
 	interval    time.Duration
 	counters    Counters
 	throttle    *pace.Throttle
+	egress      func(from, dest string) (bind, helo string)
 }
 
 // SetCounters wires the status counters.
 func (s *Scheduler) SetCounters(c Counters) { s.counters = c }
 
-// SetThrottle wires the outbound pacing (per-destination rate limits).
-// nil paces nothing.
+// SetThrottle wires the outbound pacing. nil paces nothing.
 func (s *Scheduler) SetThrottle(t *pace.Throttle) { s.throttle = t }
+
+// SetEgress wires outbound source selection: for each envelope it
+// returns the local IP to bind and the EHLO name to announce (both
+// empty for the OS default and the server hostname). Resolving it here,
+// once per delivery, keeps a round-robin pool from advancing twice and
+// lets the pacing key on the chosen IP.
+func (s *Scheduler) SetEgress(f func(from, dest string) (bind, helo string)) { s.egress = f }
 
 // minWake floors the sleep between passes so pacing a burst of held
 // messages cannot spin the loop.
@@ -126,21 +135,33 @@ func (s *Scheduler) Process(now time.Time) {
 }
 
 func (s *Scheduler) attempt(e *Envelope, now time.Time) {
-	// Outbound pacing: hold the message if its destination is over its
-	// configured rate. This is not a failed attempt — the envelope keeps
-	// its attempt count and simply comes due again once a token frees.
-	if ok, wait := s.throttle.Reserve(e.Domain); !ok {
-		e.NextAttempt = now.Add(wait)
-		if uerr := s.q.Update(e); uerr != nil {
-			s.log.Error("queue update failed", "queue_id", e.ID, "error", uerr.Error())
-		}
-		s.log.Info("delivery paced",
-			"event", "throttle", "protocol", "smtp",
-			"queue_id", e.ID, "domain", e.Domain, "next", e.NextAttempt)
-		return
+	// Resolve the outbound source once: its IP feeds both the pacing key
+	// (per-IP limits) and the actual delivery.
+	var bind, helo string
+	if s.egress != nil {
+		bind, helo = s.egress(e.From, e.Domain)
 	}
 
-	err := s.t.Deliver(e)
+	// Outbound pacing: hold the message if its sender scope or its egress
+	// IP is over rate toward this destination. Not a failed attempt — the
+	// envelope keeps its attempt count and comes due again once a token
+	// frees.
+	if s.throttle != nil {
+		_, sdom, _ := storage.Split(e.From)
+		key := pace.Key{Mailbox: e.From, Domain: sdom, EgressIP: bind, Dest: e.Domain}
+		if ok, wait := s.throttle.Reserve(key); !ok {
+			e.NextAttempt = now.Add(wait)
+			if uerr := s.q.Update(e); uerr != nil {
+				s.log.Error("queue update failed", "queue_id", e.ID, "error", uerr.Error())
+			}
+			s.log.Info("delivery paced",
+				"event", "throttle", "protocol", "smtp",
+				"queue_id", e.ID, "from", e.From, "domain", e.Domain, "next", e.NextAttempt)
+			return
+		}
+	}
+
+	err := s.t.Deliver(e, bind, helo)
 	if err == nil {
 		s.countDelivered()
 		s.log.Info("message delivered",

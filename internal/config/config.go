@@ -67,10 +67,11 @@ type Config struct {
 	// Warnings collects non-fatal findings from validation.
 	Warnings []string `yaml:"-"`
 
-	// govRules is RateLimit.Rules compiled and validated at load time.
+	// govRules is RateLimit.Rules (plus per-domain/mailbox outbound rate
+	// caps) compiled and validated at load time.
 	govRules []ratelimit.GovRule
-	// throttleRules is Queue.Throttle compiled at load time.
-	throttleRules []pace.Rule
+	// throttleConfig is the scoped pacing configuration compiled at load.
+	throttleConfig pace.Config
 }
 
 // Server holds global daemon settings.
@@ -156,14 +157,38 @@ type Queue struct {
 
 // ThrottleRule paces delivery toward one destination. `to` is a
 // destination domain, or "*" for the default applied to any domain
-// without a specific rule. `messages` per `window` (a Go duration) is
-// the sustained rate; `burst` is how many may go back-to-back before the
-// pacing bites (default: the same as messages, i.e. one window's worth).
+// without a specific rule. The rate is either `interval` (a Go duration:
+// "one message every 5s") or `messages` per `window`; `burst` is how
+// many may go back-to-back before the pacing bites (default: one
+// window's worth). `per_ip` (only meaningful in the global
+// queue.throttle) applies the limit independently to each egress IP.
 type ThrottleRule struct {
 	To       string `yaml:"to"`
+	Interval string `yaml:"interval"`
 	Messages int    `yaml:"messages"`
 	Window   string `yaml:"window"`
 	Burst    int    `yaml:"burst"`
+	PerIP    bool   `yaml:"per_ip"`
+}
+
+// OutboundPolicy overrides outbound behaviour for one domain or one
+// mailbox: the source IP it sends from, its own sending rate caps, and
+// its own pacing toward destinations. Mailbox settings win over the
+// domain's, which win over the global configuration.
+type OutboundPolicy struct {
+	// EgressIP pins outbound mail to this public IP (must be one of the
+	// egress.addresses). Empty uses the global egress strategy.
+	EgressIP string `yaml:"egress_ip"`
+	// Rate caps this sender's outbound volume.
+	Rate OutboundRate `yaml:"rate"`
+	// Throttle paces this sender's delivery toward destinations.
+	Throttle []ThrottleRule `yaml:"throttle"`
+}
+
+// OutboundRate is a per-hour sending cap. Zero means no cap.
+type OutboundRate struct {
+	MessagesPerHour   int `yaml:"messages_per_hour"`
+	RecipientsPerHour int `yaml:"recipients_per_hour"`
 }
 
 // DKIM configures outbound signing.
@@ -358,6 +383,8 @@ type Domain struct {
 	// CatchAll receives any address in the domain that matches neither a
 	// mailbox nor an alias. Empty means unknown addresses are rejected.
 	CatchAll Targets `yaml:"-"`
+	// Outbound is the domain's outbound policy (egress IP, rate, pacing).
+	Outbound OutboundPolicy `yaml:"-"`
 }
 
 // DKIMSelectorFor returns the configured selector of a domain.
@@ -408,6 +435,9 @@ type User struct {
 	KeepLocal *bool `yaml:"keep_local"`
 	// Filters are evaluated in order on local delivery.
 	Filters []filter.Rule `yaml:"filters"`
+	// Outbound is this mailbox's outbound policy (egress IP, rate,
+	// pacing), overriding the domain's.
+	Outbound *OutboundPolicy `yaml:"outbound"`
 }
 
 // PasswordHashFor returns the stored hash for an address, across
@@ -548,7 +578,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	cfg.compileRateLimitRules()
-	cfg.compileThrottleRules()
+	cfg.compileThrottle()
 	return cfg, nil
 }
 

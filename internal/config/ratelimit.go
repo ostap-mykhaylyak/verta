@@ -53,6 +53,29 @@ func (c *Config) compileRateLimitRules() {
 			Recipients: r.Recipients,
 		})
 	}
+
+	// Per-domain and per-mailbox outbound rate caps become outbound
+	// sender-scoped override rules (per hour), so the same Governor
+	// enforces them alongside the global rules.
+	for _, d := range c.Domains {
+		if r := d.Outbound.Rate; r.MessagesPerHour > 0 || r.RecipientsPerHour > 0 {
+			c.govRules = append(c.govRules, ratelimit.GovRule{
+				By: ratelimit.BySenderDomain, Match: d.Name, Direction: ratelimit.DirOutbound,
+				Window: time.Hour, Messages: r.MessagesPerHour, Recipients: r.RecipientsPerHour,
+			})
+		}
+	}
+	for _, u := range c.Users {
+		if u.Outbound == nil {
+			continue
+		}
+		if r := u.Outbound.Rate; r.MessagesPerHour > 0 || r.RecipientsPerHour > 0 {
+			c.govRules = append(c.govRules, ratelimit.GovRule{
+				By: ratelimit.BySenderMailbox, Match: u.Email, Direction: ratelimit.DirOutbound,
+				Window: time.Hour, Messages: r.MessagesPerHour, Recipients: r.RecipientsPerHour,
+			})
+		}
+	}
 }
 
 // GovernorRules returns the compiled custom rate-limit rules.

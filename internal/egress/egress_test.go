@@ -78,3 +78,19 @@ func TestNilPool(t *testing.T) {
 		t.Errorf("nil pool must return the zero Source, got %+v", got)
 	}
 }
+
+// ByAddress finds a specific pool address, for a domain/mailbox pin.
+func TestByAddress(t *testing.T) {
+	p := pool(StrategyRoundRobin)
+	s, ok := p.ByAddress("203.0.113.11")
+	if !ok || s.Bind != "10.1.0.21" || s.HELO != "mail2.example.com" {
+		t.Errorf("ByAddress = %+v, %v", s, ok)
+	}
+	if _, ok := p.ByAddress("198.51.100.9"); ok {
+		t.Error("unknown address must not resolve")
+	}
+	var nilp *Pool
+	if _, ok := nilp.ByAddress("x"); ok {
+		t.Error("nil pool ByAddress must be false")
+	}
+}

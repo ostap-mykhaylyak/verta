@@ -6,42 +6,85 @@ import (
 	"github.com/ostap-mykhaylyak/verta/internal/pace"
 )
 
-// compileThrottleRules validates the queue pacing rules and stores the
-// ones that hold together. An invalid rule (missing target, bad window,
-// no rate) becomes a warning and is skipped.
-func (c *Config) compileThrottleRules() {
-	c.throttleRules = c.throttleRules[:0]
+// compileThrottle builds the scoped pacing configuration from the global
+// queue.throttle rules and the per-domain / per-mailbox outbound.throttle
+// rules. Invalid rules become warnings and are skipped.
+func (c *Config) compileThrottle() {
+	cfg := pace.Config{
+		ByDomain:  map[string][]pace.Rule{},
+		ByMailbox: map[string][]pace.Rule{},
+	}
+
 	for i, r := range c.Queue.Throttle {
-		if r.To == "" {
-			c.warnf("queue.throttle[%d]: 'to' is required (a domain or \"*\"), rule ignored", i)
+		if pr, ok := c.paceRule(r, "queue.throttle", i); ok {
+			if r.PerIP {
+				cfg.PerIP = append(cfg.PerIP, pr)
+			} else {
+				cfg.Global = append(cfg.Global, pr)
+			}
+		}
+	}
+	for _, d := range c.Domains {
+		for i, r := range d.Outbound.Throttle {
+			if pr, ok := c.paceRule(r, "domain "+d.Name+" outbound.throttle", i); ok {
+				cfg.ByDomain[d.Name] = append(cfg.ByDomain[d.Name], pr)
+			}
+		}
+	}
+	for _, u := range c.Users {
+		if u.Outbound == nil {
 			continue
 		}
-		if r.Messages <= 0 {
-			c.warnf("queue.throttle[%d]: 'messages' must be > 0, rule ignored", i)
-			continue
+		for i, r := range u.Outbound.Throttle {
+			if pr, ok := c.paceRule(r, "mailbox "+u.Email+" outbound.throttle", i); ok {
+				cfg.ByMailbox[u.Email] = append(cfg.ByMailbox[u.Email], pr)
+			}
 		}
+	}
+	c.throttleConfig = cfg
+}
+
+// paceRule converts one ThrottleRule to a pace.Rule, warning and
+// returning false on an invalid rule. The rate comes from `interval`
+// ("one every 5s") or `messages`/`window`.
+func (c *Config) paceRule(r ThrottleRule, where string, i int) (pace.Rule, bool) {
+	if r.To == "" {
+		c.warnf("%s[%d]: 'to' is required (a domain or \"*\"), rule ignored", where, i)
+		return pace.Rule{}, false
+	}
+	var rate, burst float64
+	burst = float64(r.Burst)
+	switch {
+	case r.Interval != "":
+		d, err := time.ParseDuration(r.Interval)
+		if err != nil || d <= 0 {
+			c.warnf("%s[%d]: invalid 'interval' %q, rule ignored", where, i, r.Interval)
+			return pace.Rule{}, false
+		}
+		rate = 1 / d.Seconds()
+		if burst <= 0 {
+			burst = 1
+		}
+	case r.Messages > 0:
 		window := time.Hour
 		if r.Window != "" {
 			d, err := time.ParseDuration(r.Window)
 			if err != nil || d <= 0 {
-				c.warnf("queue.throttle[%d]: invalid 'window' %q, rule ignored", i, r.Window)
-				continue
+				c.warnf("%s[%d]: invalid 'window' %q, rule ignored", where, i, r.Window)
+				return pace.Rule{}, false
 			}
 			window = d
 		}
-		burst := float64(r.Burst)
+		rate = float64(r.Messages) / window.Seconds()
 		if burst <= 0 {
 			burst = float64(r.Messages)
 		}
-		c.throttleRules = append(c.throttleRules, pace.Rule{
-			Match: r.To,
-			Limit: pace.Limit{
-				Rate:  float64(r.Messages) / window.Seconds(),
-				Burst: burst,
-			},
-		})
+	default:
+		c.warnf("%s[%d]: set 'interval' or 'messages', rule ignored", where, i)
+		return pace.Rule{}, false
 	}
+	return pace.Rule{Match: r.To, Limit: pace.Limit{Rate: rate, Burst: burst}}, true
 }
 
-// ThrottleRules returns the compiled outbound pacing rules.
-func (c *Config) ThrottleRules() []pace.Rule { return c.throttleRules }
+// ThrottleConfig returns the compiled scoped pacing configuration.
+func (c *Config) ThrottleConfig() pace.Config { return c.throttleConfig }

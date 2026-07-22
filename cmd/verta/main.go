@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"os/signal"
@@ -479,16 +480,6 @@ func runDaemon(cfgPath, pidfile, sockPath string) (err error) {
 		return err
 	}
 	transport := &queue.SMTPTransport{Hostname: cfg.Server.Hostname}
-	// Outbound source-IP rotation, when a pool is configured.
-	if pool := egressPool(cfg); pool != nil {
-		transport.Source = func(from, rcptDomain string) (bind, helo string) {
-			s := pool.Select(from, rcptDomain)
-			return s.Bind, s.HELO
-		}
-		logs.Service.Info("outbound IP rotation enabled",
-			"event", "egress_pool", "strategy", cfg.Egress.Strategy,
-			"addresses", len(cfg.Egress.Addresses))
-	}
 	bounceFn := func(e *queue.Envelope, reason string) {
 		// A hard bounce is reputation-relevant: it is the clearest
 		// signal that a sender is mailing addresses it should not.
@@ -516,10 +507,16 @@ func runDaemon(cfgPath, pidfile, sockPath string) (err error) {
 	}
 	sched := queue.NewScheduler(q, transport, bounceFn, cfg.Queue.MaxAttempts, logs.Service)
 	sched.SetCounters(counters)
-	if th := pace.New(cfg.ThrottleRules()); th != nil {
+	// Outbound source selection: per-mailbox / per-domain pins, then the
+	// rotation pool.
+	if sel := egressSelector(cfg, logs.Service); sel != nil {
+		sched.SetEgress(sel)
+		logs.Service.Info("outbound IP selection enabled",
+			"event", "egress", "strategy", cfg.Egress.Strategy, "addresses", len(cfg.Egress.Addresses))
+	}
+	if th := pace.New(cfg.ThrottleConfig()); th != nil {
 		sched.SetThrottle(th)
-		logs.Service.Info("outbound pacing enabled",
-			"event", "throttle_config", "rules", len(cfg.Queue.Throttle))
+		logs.Service.Info("outbound pacing enabled", "event", "throttle_config")
 	}
 	schedStop := make(chan struct{})
 	go sched.Run(schedStop)
@@ -1067,6 +1064,53 @@ func egressPool(cfg *config.Config) *egress.Pool {
 		})
 	}
 	return egress.New(cfg.Egress.Strategy, addrs)
+}
+
+// egressSelector resolves the outbound source per envelope: a mailbox
+// pinned to an IP wins, then its domain, then the rotation pool's
+// strategy. Returns nil when neither pins nor a pool are configured. A
+// pin to an IP absent from the pool is logged and ignored.
+func egressSelector(cfg *config.Config, log *slog.Logger) func(from, dest string) (bind, helo string) {
+	pool := egressPool(cfg)
+	mailboxPin := map[string]string{}
+	domainPin := map[string]string{}
+	for _, u := range cfg.Users {
+		if u.Outbound != nil && u.Outbound.EgressIP != "" {
+			mailboxPin[strings.ToLower(u.Email)] = u.Outbound.EgressIP
+		}
+	}
+	for _, d := range cfg.Domains {
+		if d.Outbound.EgressIP != "" {
+			domainPin[d.Name] = d.Outbound.EgressIP
+		}
+	}
+	if pool == nil && len(mailboxPin) == 0 && len(domainPin) == 0 {
+		return nil
+	}
+	pin := func(ip string) (egress.Source, bool) {
+		s, ok := pool.ByAddress(ip)
+		if !ok {
+			log.Warn("egress pin references an IP not in egress.addresses",
+				"event", "egress_config", "ip", ip)
+		}
+		return s, ok
+	}
+	return func(from, dest string) (bind, helo string) {
+		if ip := mailboxPin[strings.ToLower(from)]; ip != "" {
+			if s, ok := pin(ip); ok {
+				return s.Bind, s.HELO
+			}
+		}
+		if _, sdom, ok := storage.Split(from); ok {
+			if ip := domainPin[sdom]; ip != "" {
+				if s, ok := pin(ip); ok {
+					return s.Bind, s.HELO
+				}
+			}
+		}
+		s := pool.Select(from, dest)
+		return s.Bind, s.HELO
+	}
 }
 
 // newLimits builds the limiters from the current config (fresh

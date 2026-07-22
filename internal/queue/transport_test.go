@@ -109,11 +109,11 @@ func TestTransportUsesEgressSource(t *testing.T) {
 		Port:     atoi(port),
 		LookupMX: func(string) ([]string, error) { return []string{"127.0.0.1"}, nil },
 		Timeout:  5 * time.Second,
-		Source: func(from, rcptDomain string) (bind, helo string) {
-			return "127.0.0.1", "mail7.here.it" // bind loopback, custom EHLO
-		},
 	}
 	s := NewScheduler(q, tr, func(e *Envelope, r string) { t.Errorf("unexpected bounce: %s", r) }, 3, quietLog())
+	s.SetEgress(func(from, dest string) (bind, helo string) {
+		return "127.0.0.1", "mail7.here.it" // bind loopback, custom EHLO
+	})
 	s.Process(time.Now())
 
 	ents, err := os.ReadDir(filepath.Join(root, "friend", "new"))

@@ -82,6 +82,21 @@ func New(strategy string, addrs []Address) *Pool {
 	return p
 }
 
+// ByAddress returns the source for a specific public IP in the pool,
+// used when a domain or mailbox is pinned to one address. ok is false
+// when the address is not in the pool.
+func (p *Pool) ByAddress(public string) (Source, bool) {
+	if p == nil {
+		return Source{}, false
+	}
+	for _, a := range p.addrs {
+		if a.Public == public {
+			return a.source(), true
+		}
+	}
+	return Source{}, false
+}
+
 func (a Address) source() Source {
 	bind := a.Bind
 	if bind == "" {

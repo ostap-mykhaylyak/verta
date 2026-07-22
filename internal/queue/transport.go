@@ -26,10 +26,6 @@ type SMTPTransport struct {
 	LookupMX func(domain string) ([]string, error)
 	// Timeout bounds dial and per-command waits.
 	Timeout time.Duration
-	// Source selects the outbound IP to bind and the EHLO name to
-	// announce for one envelope (from, recipient domain). nil means the
-	// OS default source and Hostname — no rotation.
-	Source func(from, rcptDomain string) (bind, helo string)
 }
 
 func (t *SMTPTransport) port() int {
@@ -72,16 +68,17 @@ func trimDot(h string) string {
 	return h
 }
 
-// Deliver implements Transport: try each MX in order, stopping at the
-// first success or permanent refusal.
-func (t *SMTPTransport) Deliver(e *Envelope) error {
+// Deliver implements Transport: try each MX in order, from the given
+// source (bind IP and EHLO name), stopping at the first success or
+// permanent refusal.
+func (t *SMTPTransport) Deliver(e *Envelope, bind, helo string) error {
 	hosts, err := t.mxHosts(e.Domain)
 	if err != nil {
 		return fmt.Errorf("mx lookup %s: %w", e.Domain, err)
 	}
 	var lastErr error = fmt.Errorf("no MX hosts for %s", e.Domain)
 	for _, h := range hosts {
-		err := t.trySend(h, e)
+		err := t.trySend(h, e, bind, helo)
 		if err == nil {
 			return nil
 		}
@@ -94,20 +91,17 @@ func (t *SMTPTransport) Deliver(e *Envelope) error {
 	return lastErr
 }
 
-// trySend runs one SMTP transaction against one host.
-func (t *SMTPTransport) trySend(host string, e *Envelope) error {
-	// Pick the outbound source (IP to bind, EHLO name) for this envelope.
+// trySend runs one SMTP transaction against one host, binding bind (when
+// set) and announcing helo (or the default hostname).
+func (t *SMTPTransport) trySend(host string, e *Envelope, bind, helo string) error {
 	ehlo := t.Hostname
+	if helo != "" {
+		ehlo = helo
+	}
 	dialer := net.Dialer{Timeout: t.timeout()}
-	if t.Source != nil {
-		bind, helo := t.Source(e.From, e.Domain)
-		if helo != "" {
-			ehlo = helo
-		}
-		if bind != "" {
-			if ip := net.ParseIP(bind); ip != nil {
-				dialer.LocalAddr = &net.TCPAddr{IP: ip}
-			}
+	if bind != "" {
+		if ip := net.ParseIP(bind); ip != nil {
+			dialer.LocalAddr = &net.TCPAddr{IP: ip}
 		}
 	}
 

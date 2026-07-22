@@ -33,6 +33,8 @@ type DomainFile struct {
 	// CatchAll receives every address in the domain that matches no
 	// mailbox and no alias. Empty rejects unknown addresses.
 	CatchAll Targets `yaml:"catch_all"`
+	// Outbound is this domain's outbound policy (egress IP, rate, pacing).
+	Outbound OutboundPolicy `yaml:"outbound"`
 
 	// path is where the file was read from, for error messages.
 	path string
@@ -88,6 +90,7 @@ func (c *Config) loadDomains(dir string) error {
 			DKIMSelector: df.DKIMSelector,
 			Aliases:      normalizeAliases(df.Aliases),
 			CatchAll:     df.CatchAll,
+			Outbound:     df.Outbound,
 		})
 		c.Users = append(c.Users, df.Users...)
 	}

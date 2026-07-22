@@ -78,3 +78,27 @@ users:
 # Catch-all: any address in this domain that matches neither a mailbox
 # nor an alias lands here. Leave unset to reject unknown addresses.
 # catch_all: admin@example.com
+
+# Outbound policy for this whole domain (each mailbox can override its
+# own below). egress_ip pins the source IP (must be one of the
+# egress.addresses in config.yaml); rate caps the domain's sending;
+# throttle paces it per destination.
+# outbound:
+#   egress_ip: 203.0.113.10
+#   rate:
+#     messages_per_hour: 1000
+#     recipients_per_hour: 5000
+#   throttle:
+#     - to: gmail.com
+#       interval: 5s          # one message to Gmail every 5 seconds
+#
+# Per-mailbox override (on a user entry above):
+#   - email: bulk@example.com
+#     maildir: /var/mail/example.com/bulk
+#     outbound:
+#       egress_ip: 203.0.113.11
+#       rate: { messages_per_hour: 20000 }
+#       throttle:
+#         - to: "*"
+#           messages: 100
+#           window: 1m

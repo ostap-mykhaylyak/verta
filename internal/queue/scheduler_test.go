@@ -14,7 +14,7 @@ type recTransport struct {
 	delivered []string
 }
 
-func (r *recTransport) Deliver(e *Envelope) error {
+func (r *recTransport) Deliver(e *Envelope, bind, helo string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.delivered = append(r.delivered, e.Rcpt)
@@ -38,9 +38,9 @@ func TestSchedulerPacesPerDomain(t *testing.T) {
 
 	tr := &recTransport{}
 	s := NewScheduler(q, tr, func(*Envelope, string) { t.Error("no bounce expected") }, 10, quietLog())
-	s.SetThrottle(pace.New([]pace.Rule{
+	s.SetThrottle(pace.New(pace.Config{Global: []pace.Rule{
 		{Match: "gmail.com", Limit: pace.Limit{Rate: 0.2, Burst: 1}},
-	}))
+	}}))
 
 	now := time.Now()
 	s.Process(now)
@@ -74,7 +74,7 @@ func TestSchedulerUnthrottledDomain(t *testing.T) {
 
 	tr := &recTransport{}
 	s := NewScheduler(q, tr, func(*Envelope, string) { t.Error("no bounce") }, 10, quietLog())
-	s.SetThrottle(pace.New([]pace.Rule{{Match: "gmail.com", Limit: pace.Limit{Rate: 0.2, Burst: 1}}}))
+	s.SetThrottle(pace.New(pace.Config{Global: []pace.Rule{{Match: "gmail.com", Limit: pace.Limit{Rate: 0.2, Burst: 1}}}}))
 
 	s.Process(time.Now())
 	if tr.count() != 2 {

@@ -69,7 +69,7 @@ type fakeTransport struct {
 	calls   []string
 }
 
-func (f *fakeTransport) Deliver(e *Envelope) error {
+func (f *fakeTransport) Deliver(e *Envelope, bind, helo string) error {
 	f.calls = append(f.calls, e.Rcpt)
 	return f.outcome[e.Rcpt]
 }

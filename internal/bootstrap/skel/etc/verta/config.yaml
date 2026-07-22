@@ -74,13 +74,17 @@ queue:
   max_attempts: 10
   # Outbound pacing: hold messages in the queue and release them to a
   # destination at a maximum rate, instead of bursting. 'to' is a
-  # destination domain or "*" (default for anything without its own
-  # rule); 'messages' per 'window' (a Go duration) is the rate; 'burst'
-  # is how many may go back-to-back (default: one window's worth).
+  # destination domain or "*" (default). The rate is 'interval' ("one
+  # every 5s") or 'messages' per 'window'; 'burst' is how many may go
+  # back-to-back (default: one window's worth). 'per_ip: true' applies
+  # the limit to each egress IP independently. Pacing can also be set
+  # per domain and per mailbox in the domain files (outbound.throttle).
   # throttle:
   #   - to: gmail.com        # at most one message to Gmail every 5s
-  #     messages: 1
-  #     window: 5s
+  #     interval: 5s
+  #   - to: gmail.com        # ...and no more than one per egress IP per 5s
+  #     interval: 5s
+  #     per_ip: true
   #   - to: "*"              # everything else: 60 a minute
   #     messages: 60
   #     window: 1m

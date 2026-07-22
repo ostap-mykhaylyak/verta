@@ -30,6 +30,7 @@ servers, VPS and LXD/LXC containers.
 - [Blacklists](#blacklists)
 - [Rate limiting](#rate-limiting)
 - [Outbound IP rotation](#outbound-ip-rotation)
+- [Per-domain and per-mailbox outbound policy](#per-domain-and-per-mailbox-outbound-policy)
 - [Reputation and warm-up](#reputation-and-warm-up)
 - [Administrative API](#administrative-api)
 - [Running in a container](#running-in-a-container)
@@ -68,7 +69,7 @@ Download the bundle for your architecture, unpack it and let the
 binary provision the system:
 
 ```sh
-curl -LO https://github.com/ostap-mykhaylyak/verta/releases/download/v0.4.0/verta-v0.4.0-linux-amd64.tar.gz
+curl -LO https://github.com/ostap-mykhaylyak/verta/releases/download/v0.5.0/verta-v0.5.0-linux-amd64.tar.gz
 tar xzf verta-*.tar.gz && cd verta-*
 sudo ./verta --init
 sudo systemctl daemon-reload
@@ -84,7 +85,7 @@ systemd unit. It never overwrites an existing configuration, so
 **running it again from a newer bundle is the upgrade path**:
 
 ```sh
-tar xzf verta-v0.4.0-linux-amd64.tar.gz && cd verta-v0.4.0-linux-amd64
+tar xzf verta-v0.5.0-linux-amd64.tar.gz && cd verta-v0.5.0-linux-amd64
 sudo ./verta --init            # replaces the binary, keeps your config
 sudo systemctl restart verta
 ```
@@ -528,22 +529,29 @@ queue:
   max_attempts: 10
   throttle:
     - to: gmail.com     # at most one message to Gmail every 5 seconds
-      messages: 1
-      window: 5s
+      interval: 5s
+    - to: gmail.com     # ...and no more than one per egress IP per 5s
+      interval: 5s
+      per_ip: true
     - to: "*"           # everything else: 60 per minute
       messages: 60
       window: 1m
       # burst: 10       # optional: allow 10 back-to-back, then pace
 ```
 
-`to` is a destination domain, or `*` for the default applied to any
-domain without its own rule. `messages` per `window` (a Go duration) is
-the sustained rate; `burst` is how many may go back-to-back before the
-pacing bites (default: one window's worth). Pacing is per destination
-domain, across the whole queue; a held message keeps its place and its
-attempt count — it is a delay, not a failure. The scheduler wakes as
-soon as the next message is due, so a `5s` spacing is honoured to the
-second, not rounded to the retry interval.
+`to` is a destination domain, or `*` for the default. The rate is either
+`interval` (a Go duration — "one every 5s", the simplest form) or
+`messages` per `window`; `burst` is how many may go back-to-back before
+the pacing bites (default: one window's worth). `per_ip: true` applies
+the limit **independently to each [egress IP](#outbound-ip-rotation)** —
+useful with rotation, so every IP keeps its own steady rate toward a
+picky destination.
+
+A held message keeps its place and its attempt count — it is a delay,
+not a failure. The scheduler wakes as soon as the next message is due,
+so a `5s` spacing is honoured to the second, not rounded to the retry
+interval. Pacing can also be set **per domain and per mailbox** — see
+below.
 
 ---
 
@@ -807,6 +815,58 @@ Changing the pool takes effect on restart.
 
 ---
 
+## Per-domain and per-mailbox outbound policy
+
+Everything above — the source IP, the sending rate, and the pacing — can
+also be set **per hosted domain** and **per individual sending mailbox**,
+right in the domain file, under an `outbound` block. The most specific
+setting wins: **mailbox → domain → global**.
+
+```yaml
+# /etc/verta/domains/clientea.com.yaml
+name: clientea.com
+
+# Whole-domain outbound policy.
+outbound:
+  egress_ip: 203.0.113.10          # this domain sends from this IP…
+  rate:                            # …no more than this many per hour…
+    messages_per_hour: 1000
+    recipients_per_hour: 5000
+  throttle:                        # …and paced toward picky destinations
+    - to: gmail.com
+      interval: 5s
+
+users:
+  - email: bulk@clientea.com
+    maildir: /var/mail/clientea.com/bulk
+    outbound:                      # this mailbox overrides the domain
+      egress_ip: 203.0.113.11
+      rate:
+        messages_per_hour: 20000
+      throttle:
+        - to: "*"
+          messages: 100
+          window: 1m
+```
+
+- **`egress_ip`** pins outbound mail to one IP from the
+  [egress pool](#outbound-ip-rotation) (it must be one of
+  `egress.addresses`). A mailbox pin wins over its domain's; without
+  either, the global egress strategy applies.
+- **`rate`** caps the sender's outbound volume (per hour). It compiles
+  into the same engine as the [rate-limit rules](#custom-rules), as an
+  outbound cap keyed on the sender domain or mailbox.
+- **`throttle`** paces that sender's delivery toward destinations, with
+  the same fields as the global [pacing](#pacing). The per-sender pace is
+  independent of, and combines with, any global `per_ip` pace — a
+  delivery waits for whichever bucket is emptier.
+
+This is what lets one server host many tenants with separate outbound
+identities: give each domain (or a heavy mailbox) its own IP, its own
+sending ceiling, and its own cadence toward the big receivers.
+
+---
+
 ## Reputation and warm-up
 
 ```yaml
@@ -939,7 +999,7 @@ Rotation is delegated to logrotate; `SIGHUP` reopens the files.
 `verta --status` asks the running daemon what it is doing:
 
 ```
-verta v0.4.0  mail.example.com
+verta v0.5.0  mail.example.com
   pid 2841, up 6d3h12m
 
 Listeners
