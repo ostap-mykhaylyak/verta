@@ -72,6 +72,18 @@ auth:
 queue:
   dir: /var/lib/verta/queue
   max_attempts: 10
+  # Outbound pacing: hold messages in the queue and release them to a
+  # destination at a maximum rate, instead of bursting. 'to' is a
+  # destination domain or "*" (default for anything without its own
+  # rule); 'messages' per 'window' (a Go duration) is the rate; 'burst'
+  # is how many may go back-to-back (default: one window's worth).
+  # throttle:
+  #   - to: gmail.com        # at most one message to Gmail every 5s
+  #     messages: 1
+  #     window: 5s
+  #   - to: "*"              # everything else: 60 a minute
+  #     messages: 60
+  #     window: 1m
 
 # Forwarding (aliases and mailboxes that point off-server). srs_secret
 # keys the Sender Rewriting Scheme so a forwarded message passes SPF at

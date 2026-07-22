@@ -51,3 +51,35 @@ rate_limit:
 		t.Errorf("want a warning naming the bogus dimension, got %v", cfg.Warnings)
 	}
 }
+
+// queue.throttle must compile to pace rules, converting messages/window
+// into a per-second rate; an invalid rule warns and is skipped.
+func TestThrottleRulesParse(t *testing.T) {
+	y := minimal + `
+queue:
+  dir: /tmp/q
+  throttle:
+    - to: gmail.com
+      messages: 1
+      window: 5s
+    - to: "*"
+      messages: 60
+      window: 1m
+    - to: broken.com
+      messages: 0
+`
+	cfg, err := Load(write(t, y, oneDomain))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := cfg.ThrottleRules()
+	if len(rules) != 2 {
+		t.Fatalf("compiled throttle rules = %d, want 2 (broken skipped)", len(rules))
+	}
+	// gmail: 1 per 5s => 0.2/s.
+	for _, r := range rules {
+		if r.Match == "gmail.com" && (r.Limit.Rate < 0.19 || r.Limit.Rate > 0.21) {
+			t.Errorf("gmail rate = %v, want ~0.2/s", r.Limit.Rate)
+		}
+	}
+}

@@ -68,7 +68,7 @@ Download the bundle for your architecture, unpack it and let the
 binary provision the system:
 
 ```sh
-curl -LO https://github.com/ostap-mykhaylyak/verta/releases/download/v0.3.0/verta-v0.3.0-linux-amd64.tar.gz
+curl -LO https://github.com/ostap-mykhaylyak/verta/releases/download/v0.4.0/verta-v0.4.0-linux-amd64.tar.gz
 tar xzf verta-*.tar.gz && cd verta-*
 sudo ./verta --init
 sudo systemctl daemon-reload
@@ -84,7 +84,7 @@ systemd unit. It never overwrites an existing configuration, so
 **running it again from a newer bundle is the upgrade path**:
 
 ```sh
-tar xzf verta-v0.3.0-linux-amd64.tar.gz && cd verta-v0.3.0-linux-amd64
+tar xzf verta-v0.4.0-linux-amd64.tar.gz && cd verta-v0.4.0-linux-amd64
 sudo ./verta --init            # replaces the binary, keeps your config
 sudo systemctl restart verta
 ```
@@ -514,6 +514,37 @@ domain itself per RFC 5321) and uses STARTTLS opportunistically.
 A message with a null reverse-path is never bounced, which is what
 stops two servers from bouncing at each other forever.
 
+### Pacing
+
+`queue.throttle` holds messages toward a destination and releases them
+at a maximum rate — the opposite of the [rate-limit rules](#custom-rules),
+which *reject*: pacing *delays*, keeping the message queued until a token
+frees. Useful when a receiver throttles a firehose (or greylists it) and
+a steady trickle gets through where a burst does not.
+
+```yaml
+queue:
+  dir: /var/lib/verta/queue
+  max_attempts: 10
+  throttle:
+    - to: gmail.com     # at most one message to Gmail every 5 seconds
+      messages: 1
+      window: 5s
+    - to: "*"           # everything else: 60 per minute
+      messages: 60
+      window: 1m
+      # burst: 10       # optional: allow 10 back-to-back, then pace
+```
+
+`to` is a destination domain, or `*` for the default applied to any
+domain without its own rule. `messages` per `window` (a Go duration) is
+the sustained rate; `burst` is how many may go back-to-back before the
+pacing bites (default: one window's worth). Pacing is per destination
+domain, across the whole queue; a held message keeps its place and its
+attempt count — it is a delay, not a failure. The scheduler wakes as
+soon as the next message is due, so a `5s` spacing is honoured to the
+second, not rounded to the retry interval.
+
 ---
 
 ## SPF, DKIM and DMARC
@@ -908,7 +939,7 @@ Rotation is delegated to logrotate; `SIGHUP` reopens the files.
 `verta --status` asks the running daemon what it is doing:
 
 ```
-verta v0.3.0  mail.example.com
+verta v0.4.0  mail.example.com
   pid 2841, up 6d3h12m
 
 Listeners

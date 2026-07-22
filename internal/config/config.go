@@ -17,6 +17,7 @@ import (
 
 	"github.com/ostap-mykhaylyak/verta/internal/blacklist"
 	"github.com/ostap-mykhaylyak/verta/internal/filter"
+	"github.com/ostap-mykhaylyak/verta/internal/pace"
 	"github.com/ostap-mykhaylyak/verta/internal/paths"
 	"github.com/ostap-mykhaylyak/verta/internal/ratelimit"
 	"gopkg.in/yaml.v3"
@@ -68,6 +69,8 @@ type Config struct {
 
 	// govRules is RateLimit.Rules compiled and validated at load time.
 	govRules []ratelimit.GovRule
+	// throttleRules is Queue.Throttle compiled at load time.
+	throttleRules []pace.Rule
 }
 
 // Server holds global daemon settings.
@@ -146,6 +149,21 @@ type Queue struct {
 	Dir string `yaml:"dir"`
 	// MaxAttempts caps transient retries before bouncing.
 	MaxAttempts int `yaml:"max_attempts"`
+	// Throttle paces outbound delivery per destination domain (hold in
+	// queue, release at the configured rate).
+	Throttle []ThrottleRule `yaml:"throttle"`
+}
+
+// ThrottleRule paces delivery toward one destination. `to` is a
+// destination domain, or "*" for the default applied to any domain
+// without a specific rule. `messages` per `window` (a Go duration) is
+// the sustained rate; `burst` is how many may go back-to-back before the
+// pacing bites (default: the same as messages, i.e. one window's worth).
+type ThrottleRule struct {
+	To       string `yaml:"to"`
+	Messages int    `yaml:"messages"`
+	Window   string `yaml:"window"`
+	Burst    int    `yaml:"burst"`
 }
 
 // DKIM configures outbound signing.
@@ -530,6 +548,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	cfg.compileRateLimitRules()
+	cfg.compileThrottleRules()
 	return cfg, nil
 }
 

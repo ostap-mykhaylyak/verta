@@ -79,6 +79,21 @@ func (q *Queue) Due(now time.Time) ([]*Envelope, []error) {
 	return due, errs
 }
 
+// Earliest returns the soonest NextAttempt strictly after now, so the
+// scheduler can sleep exactly until the next envelope — a paced message
+// only seconds away — becomes due. ok is false when nothing is pending.
+func (q *Queue) Earliest(now time.Time) (time.Time, bool) {
+	all, _ := q.load()
+	var earliest time.Time
+	found := false
+	for _, e := range all {
+		if e.NextAttempt.After(now) && (!found || e.NextAttempt.Before(earliest)) {
+			earliest, found = e.NextAttempt, true
+		}
+	}
+	return earliest, found
+}
+
 // Size returns the number of queued envelopes.
 func (q *Queue) Size() int {
 	ents, err := os.ReadDir(q.dir)

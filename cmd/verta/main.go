@@ -50,6 +50,7 @@ import (
 	"github.com/ostap-mykhaylyak/verta/internal/logging"
 	"github.com/ostap-mykhaylyak/verta/internal/mailauth"
 	"github.com/ostap-mykhaylyak/verta/internal/maildir"
+	"github.com/ostap-mykhaylyak/verta/internal/pace"
 	"github.com/ostap-mykhaylyak/verta/internal/paths"
 	"github.com/ostap-mykhaylyak/verta/internal/pop3"
 	"github.com/ostap-mykhaylyak/verta/internal/proc"
@@ -515,6 +516,11 @@ func runDaemon(cfgPath, pidfile, sockPath string) (err error) {
 	}
 	sched := queue.NewScheduler(q, transport, bounceFn, cfg.Queue.MaxAttempts, logs.Service)
 	sched.SetCounters(counters)
+	if th := pace.New(cfg.ThrottleRules()); th != nil {
+		sched.SetThrottle(th)
+		logs.Service.Info("outbound pacing enabled",
+			"event", "throttle_config", "rules", len(cfg.Queue.Throttle))
+	}
 	schedStop := make(chan struct{})
 	go sched.Run(schedStop)
 	logs.Service.Info("outbound queue open", "dir", cfg.Queue.Dir, "pending", q.Size())

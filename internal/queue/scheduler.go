@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/ostap-mykhaylyak/verta/internal/pace"
 )
 
 // PermanentError is a definitive SMTP failure (5xx): no retry, the
@@ -43,10 +45,19 @@ type Scheduler struct {
 	maxAttempts int
 	interval    time.Duration
 	counters    Counters
+	throttle    *pace.Throttle
 }
 
 // SetCounters wires the status counters.
 func (s *Scheduler) SetCounters(c Counters) { s.counters = c }
+
+// SetThrottle wires the outbound pacing (per-destination rate limits).
+// nil paces nothing.
+func (s *Scheduler) SetThrottle(t *pace.Throttle) { s.throttle = t }
+
+// minWake floors the sleep between passes so pacing a burst of held
+// messages cannot spin the loop.
+const minWake = 200 * time.Millisecond
 
 func (s *Scheduler) countDelivered() {
 	if s.counters != nil {
@@ -76,16 +87,28 @@ func NewScheduler(q *Queue, t Transport, bounce func(*Envelope, string), maxAtte
 	}
 }
 
-// Run processes the queue until stop is closed.
+// Run processes the queue until stop is closed. Between passes it sleeps
+// until the next envelope is due (a paced message may be only seconds
+// away) or the regular interval elapses, whichever is sooner.
 func (s *Scheduler) Run(stop <-chan struct{}) {
-	tick := time.NewTicker(s.interval)
-	defer tick.Stop()
 	for {
-		s.Process(time.Now())
+		now := time.Now()
+		s.Process(now)
+
+		wake := now.Add(s.interval)
+		if e, ok := s.q.Earliest(time.Now()); ok && e.Before(wake) {
+			wake = e
+		}
+		d := time.Until(wake)
+		if d < minWake {
+			d = minWake
+		}
+		timer := time.NewTimer(d)
 		select {
 		case <-stop:
+			timer.Stop()
 			return
-		case <-tick.C:
+		case <-timer.C:
 		}
 	}
 }
@@ -103,6 +126,20 @@ func (s *Scheduler) Process(now time.Time) {
 }
 
 func (s *Scheduler) attempt(e *Envelope, now time.Time) {
+	// Outbound pacing: hold the message if its destination is over its
+	// configured rate. This is not a failed attempt — the envelope keeps
+	// its attempt count and simply comes due again once a token frees.
+	if ok, wait := s.throttle.Reserve(e.Domain); !ok {
+		e.NextAttempt = now.Add(wait)
+		if uerr := s.q.Update(e); uerr != nil {
+			s.log.Error("queue update failed", "queue_id", e.ID, "error", uerr.Error())
+		}
+		s.log.Info("delivery paced",
+			"event", "throttle", "protocol", "smtp",
+			"queue_id", e.ID, "domain", e.Domain, "next", e.NextAttempt)
+		return
+	}
+
 	err := s.t.Deliver(e)
 	if err == nil {
 		s.countDelivered()
