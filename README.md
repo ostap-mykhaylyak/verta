@@ -18,6 +18,7 @@ servers, VPS and LXD/LXC containers.
 - [Installation](#installation)
 - [Configuration layout](#configuration-layout)
 - [Domains and mailboxes](#domains-and-mailboxes)
+- [Aliases, forwarding and filters](#aliases-forwarding-and-filters)
 - [TLS certificates](#tls-certificates)
 - [SMTP](#smtp)
 - [Authentication and submission](#authentication-and-submission)
@@ -66,7 +67,7 @@ Download the bundle for your architecture, unpack it and let the
 binary provision the system:
 
 ```sh
-curl -LO https://github.com/ostap-mykhaylyak/verta/releases/latest/download/verta-v0.1.0-linux-amd64.tar.gz
+curl -LO https://github.com/ostap-mykhaylyak/verta/releases/download/v0.2.0/verta-v0.2.0-linux-amd64.tar.gz
 tar xzf verta-*.tar.gz && cd verta-*
 sudo ./verta --init
 sudo systemctl daemon-reload
@@ -214,6 +215,158 @@ Argon2id (RFC 9106 parameters) and bcrypt are accepted; any other
 format is refused at load time. A mailbox without a `password_hash`
 can receive mail, but nobody can log in to it — which is exactly what
 you want for a catch-all or an alias target.
+
+---
+
+## Aliases, forwarding and filters
+
+Beyond a plain mailbox, an address can fan out to several destinations —
+other mailboxes, external addresses, or both — and mail can be sorted or
+dropped on delivery. All of it lives in the domain file; a domain that
+uses none of these keys behaves exactly as before.
+
+### Aliases
+
+An alias maps a local part to one or more **targets**. A target is a
+local mailbox (delivery), several (a distribution list), or an address on
+another host (a forward). Aliases resolve recursively — an alias may
+point at another alias or at a forwarding mailbox — with loop and depth
+protection.
+
+```yaml
+name: example.com
+users:
+  - email: mario@example.com
+    maildir: /var/mail/example.com/mario
+
+aliases:
+  info: mario@example.com                        # one mailbox
+  sales: [mario@example.com, lucia@example.com]  # distribution list
+  webmaster: someone@gmail.com                   # external target = forward
+```
+
+`info@example.com` and `sales@example.com` need no mailbox of their own.
+A target with no `@` is taken to be a local part in the same domain.
+
+### Catch-all
+
+`catch_all` receives every address in the domain that matches neither a
+mailbox nor an alias. Leave it unset to reject unknown addresses with
+`550`.
+
+```yaml
+catch_all: mario@example.com
+```
+
+**Forward an entire domain.** A domain with *no* mailboxes and a
+catch-all pointing at an external address forwards everything it
+receives — the "one Gmail for a whole domain" case:
+
+```yaml
+# /etc/verta/domains/studenti.scuola.it.yaml
+name: studenti.scuola.it
+catch_all: classe3b@gmail.com
+```
+
+### Mailbox forwarding
+
+`forward_to` on a mailbox sends a copy of every delivered message
+onward. A local copy is kept by default; `keep_local: false` makes it
+forward-only.
+
+```yaml
+users:
+  - email: mario@example.com
+    maildir: /var/mail/example.com/mario
+    forward_to: [backup@gmail.com]
+    keep_local: true      # default; false = do not store, forward only
+```
+
+### Filters
+
+Per-mailbox delivery rules, evaluated top to bottom. Every condition set
+on a rule must match (they are ANDed); actions accumulate across matching
+rules up to the first rule with `stop: true`.
+
+```yaml
+users:
+  - email: mario@example.com
+    maildir: /var/mail/example.com/mario
+    filters:
+      - from: "newsletter@"        # sender substring
+        folder: Newsletters        # file into this folder
+        stop: true
+      - subject: "[URGENT]"
+        flagged: true              # mark important
+      - to: sales@example.com      # matches To or Cc
+        folder: Sales
+      - header: "X-Mailer: sendgrid"
+        folder: Bulk
+      - larger_than: 5242880       # bytes
+        folder: Big
+      - from: spam@spammer.tld
+        discard: true              # accept on the wire, store nothing
+```
+
+| Condition | Matches (case-insensitive) |
+|---|---|
+| `from` | substring of the From header |
+| `to` | substring of To **or** Cc |
+| `subject` | substring of Subject |
+| `header` | `"Name: value"` — header present, value contains the substring |
+| `larger_than` | message strictly larger than N bytes |
+
+| Action | Effect |
+|---|---|
+| `folder` | deliver into this mailbox folder (created on demand) |
+| `junk` | deliver into the Spam folder |
+| `seen` | mark read on arrival |
+| `flagged` | mark flagged / important |
+| `forward_to` | send a copy to an address |
+| `discard` | accept but store nothing (no bounce) |
+| `stop` | stop evaluating further rules |
+
+A spam verdict from the [antispam pipeline](#spam-filtering) always wins
+over a `folder` rule (the message goes to Spam).
+
+### Forwarding and SPF (SRS)
+
+Any forward — an external alias, a `forward_to`, an external catch-all or
+a filter's `forward_to` — leaves through the [outbound queue](#outbound-queue)
+with its envelope sender rewritten by **SRS** (Sender Rewriting Scheme):
+
+```
+news@brand.com  ->  SRS0=hash=tt=brand.com=news@<forwarding-domain>
+```
+
+so the destination evaluates SPF against a domain verta is authorised to
+send for, and the forward is not rejected as a spoof. A bounce returns to
+that address, is verified (HMAC + timestamp) and relayed to the original
+sender — never an open backscatter relay.
+
+SRS needs a stable secret, in the **main** configuration:
+
+```yaml
+# /etc/verta/config.yaml
+forwarding:
+  srs_secret: "…"   # verta --init generates one; or: openssl rand -hex 32
+```
+
+Keep it stable (a bounce may return weeks later) and identical across a
+cluster. An empty secret disables SRS: forwards keep the original
+envelope sender and may be rejected downstream.
+
+For a forward to be accepted, **the forwarding domain's SPF must list
+verta's IP**, e.g. for `studenti.scuola.it`:
+
+```
+studenti.scuola.it.  IN MX  10 mail.example.com.
+studenti.scuola.it.  IN TXT "v=spf1 ip4:203.0.113.10 -all"
+```
+
+DKIM-signed mail forwards with its signature intact (verta never alters
+the body); unsigned mail from a strict-DMARC sender may still be filtered
+downstream — a limitation of any forwarder, not of verta.
 
 ---
 
@@ -661,7 +814,7 @@ Rotation is delegated to logrotate; `SIGHUP` reopens the files.
 `verta --status` asks the running daemon what it is doing:
 
 ```
-verta v0.1.0  mail.example.com
+verta v0.2.0  mail.example.com
   pid 2841, up 6d3h12m
 
 Listeners
@@ -799,7 +952,9 @@ Feature-complete against the original specification: SMTP with
 structural anti-relay, authenticated submission, IMAP and POP3,
 SPF/DKIM/DMARC, spam and virus filtering, blacklists, rate limiting,
 reputation with warm-up, the administrative API, container identity
-and the diagnostic commands.
+and the diagnostic commands. Recipient routing adds aliases,
+distribution lists, catch-all, forwarding with SRS, and per-mailbox
+delivery filters.
 
 Deliberately not implemented yet: Prometheus metrics, ARC (RFC 8617),
 OAuth2, and Linux user authentication via PAM.
