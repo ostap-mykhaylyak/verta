@@ -68,7 +68,7 @@ func submissionServer(t *testing.T, mailRoot string, mutate func(*Settings)) (ad
 		Route:         routeAdmin(mailRoot),
 		Store:         storeToMaildir,
 		Postmaster:    func() string { return "admin@example.com" },
-		Authenticate: authr.Verify,
+		Authenticate:  authr.Verify,
 		Enqueue: func(from, rcpt string, data []byte) error {
 			enq.add(rcpt)
 			return nil

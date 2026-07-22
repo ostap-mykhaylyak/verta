@@ -38,7 +38,7 @@ func testServer(t *testing.T, mailRoot string, mutate func(*Settings)) string {
 		IsLocalDomain: func(d string) bool { return d == "example.com" },
 		Route:         routeAdmin(mailRoot),
 		Store:         storeToMaildir,
-		Postmaster: func() string { return "admin@example.com" },
+		Postmaster:    func() string { return "admin@example.com" },
 	}
 	srv := New(set, backend, 8, slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

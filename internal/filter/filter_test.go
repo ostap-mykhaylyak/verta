@@ -31,7 +31,7 @@ func TestConditionsAreAnded(t *testing.T) {
 
 func TestFirstStopWins_ButActionsAccumulate(t *testing.T) {
 	rules := []Rule{
-		{From: "boss@ex.com", Flagged: true},          // no stop: keep going
+		{From: "boss@ex.com", Flagged: true},            // no stop: keep going
 		{Subject: "report", Folder: "Work", Stop: true}, // stop here
 		{Subject: "report", Seen: true},                 // never reached
 	}

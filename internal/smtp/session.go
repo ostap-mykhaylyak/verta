@@ -45,7 +45,7 @@ type session struct {
 
 type rcpt struct {
 	addr   string
-	remote bool // submission relay: enqueue instead of deliver
+	remote bool   // submission relay: enqueue instead of deliver
 	domain string // recipient domain, for the SRS forward-domain
 	plan   routing.Plan
 }

@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
 )
 
 // screenServer starts an inbound server whose Screen hook returns a
