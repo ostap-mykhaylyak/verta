@@ -28,16 +28,28 @@ storage:
   # system_user the domain maps to one real Linux account
   type: virtual
 
-  # For type: system_user, the whole domain belongs to one account:
+  # For type: system_user, the domain's mailboxes are stored under one
+  # real Linux account (files owned by its UID/GID):
   #
   #   type: system_user
   #   user: ostap
   #   home: /home/ostap          # optional, defaults to /home/<user>
-  #   maildir: "{home}/mail"     # optional, {home} expands
-  #   password_hash: "$argon2id$..."
+  #   maildir: "{home}/mail"     # optional; used only for the single
+  #                              # bound account (ostap@<domain>)
   #
-  # Mail for ostap@<domain> then lands in /home/ostap/mail with that
-  # account's UID and GID.
+  # With NO users list, the domain is that single account: mail for
+  # ostap@<domain> lands in /home/ostap/mail.
+  #
+  # Or list several mailboxes under the same account — each gets its own
+  # Maildir ({home} expands to the account home), all owned by 'ostap':
+  #
+  #   users:
+  #     - email: mario@<domain>
+  #       maildir: "{home}/mail/mario"
+  #       password_hash: "$argon2id$..."
+  #     - email: antonio@<domain>
+  #       maildir: "{home}/mail/antonio"
+  #       password_hash: "$argon2id$..."
 
 # Virtual mailboxes. password_hash enables SMTP submission, IMAP and
 # POP3 for the user; without one the mailbox can receive mail but

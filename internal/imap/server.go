@@ -26,6 +26,9 @@ type Backend struct {
 	// Authenticate verifies credentials and returns the account's
 	// Maildir root.
 	Authenticate func(email, password, ip string) (maildir string, err error)
+	// Quota reports a mailbox's current usage and its effective limit in
+	// bytes (limit 0 = unlimited). nil disables the QUOTA extension.
+	Quota func(user string) (used, limit int64)
 }
 
 // Server accepts IMAP connections.

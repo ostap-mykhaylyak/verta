@@ -55,3 +55,33 @@ func TestResolveUnknown(t *testing.T) {
 		t.Error("malformed address must not resolve")
 	}
 }
+
+// Several mailboxes can live under one system account: each resolves to
+// its own Maildir (with {home} expanded) while staying owned by the
+// account. The bare account address is no longer valid once users exist.
+func TestResolveSystemUserMultipleMailboxes(t *testing.T) {
+	cfg := &config.Config{
+		Domains: []config.Domain{
+			{Name: "ostap.dev", Storage: config.Storage{
+				Type: config.StorageSystemUser, User: "ostap", Home: "/home/ostap",
+				Maildir: "{home}/mail",
+			}},
+		},
+		Users: []config.User{
+			{Email: "mario@ostap.dev", Maildir: "{home}/mail/mario"},
+			{Email: "antonio@ostap.dev", Maildir: "/home/ostap/mail/antonio"},
+		},
+	}
+	mario, ok := Resolve(cfg, "mario@ostap.dev")
+	if !ok || mario.Dir != "/home/ostap/mail/mario" {
+		t.Errorf("mario = %+v, %v", mario, ok)
+	}
+	antonio, ok := Resolve(cfg, "antonio@ostap.dev")
+	if !ok || antonio.Dir != "/home/ostap/mail/antonio" {
+		t.Errorf("antonio = %+v, %v", antonio, ok)
+	}
+	// With users listed, the bare account address is not a mailbox.
+	if _, ok := Resolve(cfg, "ostap@ostap.dev"); ok {
+		t.Error("bare account must not resolve once users are listed")
+	}
+}

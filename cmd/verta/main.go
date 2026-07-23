@@ -556,6 +556,23 @@ func runDaemon(cfgPath, pidfile, sockPath string) (err error) {
 	// not re-walk the maildir on every message.
 	qm := quota.New(60 * time.Second)
 
+	// imapQuota answers the IMAP QUOTA extension: a mailbox's usage and
+	// its effective limit (its own quota, else the domain's shared one).
+	imapQuota := func(user string) (used, limit int64) {
+		cfg := mgr.Get()
+		mb, ok := storage.Resolve(cfg, user)
+		if !ok {
+			return 0, 0
+		}
+		used = qm.Get(mb.Dir)
+		if limit = cfg.UserQuota(user); limit == 0 {
+			if _, dom, ok := storage.Split(user); ok {
+				limit = cfg.DomainQuota(dom)
+			}
+		}
+		return used, limit
+	}
+
 	backend := smtp.Backend{
 		IsLocalDomain: func(d string) bool { return mgr.Get().HasDomain(d) },
 		Route: func(email string) (routing.Plan, bool) {
@@ -848,7 +865,7 @@ func runDaemon(cfgPath, pidfile, sockPath string) (err error) {
 				ln = stdtls.NewListener(ln, store.Config())
 			}
 			srv := imap.New(imapSettings(cfg, store, sp.implicit),
-				imap.Backend{Authenticate: accessAuth}, cfg.Server.Workers, logs.Service)
+				imap.Backend{Authenticate: accessAuth, Quota: imapQuota}, cfg.Server.Workers, logs.Service)
 			go func(name string, srv *imap.Server, ln net.Listener) {
 				if err := srv.Serve(ln); err != nil {
 					logs.Service.Error("imap server failed", "protocol", name, "error", err.Error())

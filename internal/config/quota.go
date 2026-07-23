@@ -26,18 +26,31 @@ func (c *Config) UserQuota(email string) int64 {
 // DomainMaildirs lists the Maildir root of every mailbox in a domain, so
 // the shared-quota total can be summed across them.
 func (c *Config) DomainMaildirs(domain string) []string {
-	for _, d := range c.Domains {
-		if d.Name == domain && d.Storage.Type == StorageSystemUser {
-			// A system-user domain has a single account mailbox.
-			return []string{d.Storage.MaildirPath()}
+	var d *Domain
+	for i := range c.Domains {
+		if c.Domains[i].Name == domain {
+			d = &c.Domains[i]
 		}
 	}
+	if d == nil {
+		return nil
+	}
+	system := d.Storage.Type == StorageSystemUser
 	var dirs []string
 	for _, u := range c.Users {
 		if at := strings.LastIndex(u.Email, "@"); at >= 0 &&
 			strings.EqualFold(u.Email[at+1:], domain) {
-			dirs = append(dirs, u.Maildir)
+			dir := u.Maildir
+			if system {
+				dir = d.Storage.ExpandHome(dir) // per-mailbox {home}
+			}
+			dirs = append(dirs, dir)
 		}
+	}
+	// A system-user domain with no users listed is the single bound
+	// account mailbox.
+	if system && len(dirs) == 0 {
+		dirs = append(dirs, d.Storage.MaildirPath())
 	}
 	return dirs
 }

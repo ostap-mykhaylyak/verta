@@ -53,14 +53,29 @@ func Resolve(cfg *config.Config, email string) (Mailbox, bool) {
 			continue
 		}
 		if d.Storage.Type == config.StorageSystemUser {
-			// The domain is bound to one Linux account: only that
-			// account's mailbox exists.
-			if local != d.Storage.User {
-				return Mailbox{}, false
+			// Several virtual mailboxes may live under one Linux account:
+			// each is listed in users with its own Maildir, but every file
+			// is owned by the account's UID/GID. A "{home}" in the maildir
+			// expands to the account home.
+			hasUsers := false
+			for _, u := range cfg.Users {
+				if u.Email == addr {
+					mb := Mailbox{Email: addr, Dir: d.Storage.ExpandHome(u.Maildir), UID: -1, GID: -1}
+					fillOwner(&mb, d.Storage.User)
+					return mb, true
+				}
+				if _, dom, ok := Split(u.Email); ok && dom == domain {
+					hasUsers = true
+				}
 			}
-			mb := Mailbox{Email: addr, Dir: d.Storage.MaildirPath(), UID: -1, GID: -1}
-			fillOwner(&mb, d.Storage.User)
-			return mb, true
+			// With no users listed the domain is the single bound account
+			// (the original system_user model, ostap@ostap.dev).
+			if !hasUsers && local == d.Storage.User {
+				mb := Mailbox{Email: addr, Dir: d.Storage.MaildirPath(), UID: -1, GID: -1}
+				fillOwner(&mb, d.Storage.User)
+				return mb, true
+			}
+			return Mailbox{}, false
 		}
 		for _, u := range cfg.Users {
 			if u.Email == addr {

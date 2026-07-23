@@ -417,9 +417,27 @@ type Storage struct {
 	PasswordHash string `yaml:"password_hash"`
 }
 
-// MaildirPath returns the Maildir with "{home}" expanded.
+// HomeDir returns the account home directory, defaulting to
+// /home/<user> when Home is not set.
+func (s Storage) HomeDir() string {
+	if s.Home != "" {
+		return s.Home
+	}
+	if s.User != "" {
+		return "/home/" + s.User
+	}
+	return ""
+}
+
+// ExpandHome replaces "{home}" in a path with the account home, so a
+// per-mailbox maildir can be written relative to the system account.
+func (s Storage) ExpandHome(path string) string {
+	return strings.ReplaceAll(path, "{home}", s.HomeDir())
+}
+
+// MaildirPath returns the domain Maildir with "{home}" expanded.
 func (s Storage) MaildirPath() string {
-	return strings.ReplaceAll(s.Maildir, "{home}", s.Home)
+	return s.ExpandHome(s.Maildir)
 }
 
 // User is one virtual mailbox.

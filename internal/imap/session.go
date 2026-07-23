@@ -110,6 +110,9 @@ func (s *session) readLiteral(n int) (string, error) {
 // capabilities lists what the server offers in the current state.
 func (s *session) capabilities() string {
 	caps := []string{"IMAP4rev1", "IDLE", "UIDPLUS", "MOVE", "NAMESPACE", "CHILDREN", "SPECIAL-USE"}
+	if s.srv.backend.Quota != nil {
+		caps = append(caps, "QUOTA")
+	}
 	set := s.set()
 	if !s.tls && set.TLS != nil {
 		caps = append(caps, "STARTTLS")
@@ -238,6 +241,13 @@ func (s *session) dispatch(line string) (quit bool) {
 		s.cmdCopyMove(tag, p, uidMode, true)
 	case "IDLE":
 		s.cmdIdle(tag)
+	case "GETQUOTAROOT":
+		s.cmdGetQuotaRoot(tag, p)
+	case "GETQUOTA":
+		s.cmdGetQuota(tag, p)
+	case "SETQUOTA":
+		// Quotas are managed by the server configuration, not by clients.
+		s.requireAuth(tag, func() { s.out("%s NO quota is managed by the server", tag) })
 	default:
 		s.out("%s BAD unknown command %s", tag, cmd)
 	}

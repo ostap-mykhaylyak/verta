@@ -70,7 +70,7 @@ Download the bundle for your architecture, unpack it and let the
 binary provision the system:
 
 ```sh
-curl -LO https://github.com/ostap-mykhaylyak/verta/releases/download/v0.6.0/verta-v0.6.0-linux-amd64.tar.gz
+curl -LO https://github.com/ostap-mykhaylyak/verta/releases/download/v0.7.0/verta-v0.7.0-linux-amd64.tar.gz
 tar xzf verta-*.tar.gz && cd verta-*
 sudo ./verta --init
 sudo systemctl daemon-reload
@@ -86,7 +86,7 @@ systemd unit. It never overwrites an existing configuration, so
 **running it again from a newer bundle is the upgrade path**:
 
 ```sh
-tar xzf verta-v0.6.0-linux-amd64.tar.gz && cd verta-v0.6.0-linux-amd64
+tar xzf verta-v0.7.0-linux-amd64.tar.gz && cd verta-v0.7.0-linux-amd64
 sudo ./verta --init            # replaces the binary, keeps your config
 sudo systemctl restart verta
 ```
@@ -187,8 +187,9 @@ users:
 
 ### System-user mailboxes
 
-A domain can map to one real Linux account. Mail is delivered to that
-account's Maildir with its UID and GID, honouring POSIX permissions:
+A domain's mailboxes can be stored under one real Linux account — every
+file owned by that account's UID and GID, honouring POSIX permissions.
+With no `users` list the domain is that single account:
 
 ```yaml
 # /etc/verta/domains/ostap.dev.yaml
@@ -202,9 +203,31 @@ storage:
   password_hash: "$argon2id$..."
 ```
 
-Mail for `ostap@ostap.dev` lands in `/home/ostap/mail/{cur,new,tmp}`.
-Only the bound account exists in that domain; any other recipient is
-rejected with `550`.
+Mail for `ostap@ostap.dev` then lands in `/home/ostap/mail/{cur,new,tmp}`.
+
+**Several mailboxes, one account.** List them under `users`: each gets
+its own Maildir (with `{home}` expanded to the account home), but all
+files stay owned by `ostap`. This is how one Unix account holds many
+addresses:
+
+```yaml
+name: ostap.dev
+storage:
+  type: system_user
+  user: ostap
+  home: /home/ostap
+
+users:
+  - email: mario@ostap.dev
+    maildir: "{home}/mail/mario"      # /home/ostap/mail/mario, owned by ostap
+    password_hash: "$argon2id$..."
+  - email: antonio@ostap.dev
+    maildir: "{home}/mail/antonio"
+    password_hash: "$argon2id$..."
+```
+
+Once a `users` list is present, only those addresses exist; anything
+else is rejected with `550`.
 
 ### Passwords
 
@@ -406,6 +429,12 @@ a minute.
 
 Quotas are read live from the domain files, so `verta reload` applies a
 new limit without a restart.
+
+Clients see the quota too: verta implements the **IMAP QUOTA extension
+(RFC 2087)**, so Thunderbird and others show a usage bar and how much
+space is left. The reported limit is the mailbox's own quota, or the
+domain's shared one when the mailbox has none; setting a quota from a
+client is refused (quotas are managed in the configuration).
 
 ---
 
@@ -1036,7 +1065,7 @@ Rotation is delegated to logrotate; `SIGHUP` reopens the files.
 `verta --status` asks the running daemon what it is doing:
 
 ```
-verta v0.6.0  mail.example.com
+verta v0.7.0  mail.example.com
   pid 2841, up 6d3h12m
 
 Listeners
