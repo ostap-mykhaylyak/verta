@@ -19,6 +19,7 @@ servers, VPS and LXD/LXC containers.
 - [Configuration layout](#configuration-layout)
 - [Domains and mailboxes](#domains-and-mailboxes)
 - [Aliases, forwarding and filters](#aliases-forwarding-and-filters)
+- [Disk quotas](#disk-quotas)
 - [TLS certificates](#tls-certificates)
 - [SMTP](#smtp)
 - [Authentication and submission](#authentication-and-submission)
@@ -69,7 +70,7 @@ Download the bundle for your architecture, unpack it and let the
 binary provision the system:
 
 ```sh
-curl -LO https://github.com/ostap-mykhaylyak/verta/releases/download/v0.5.0/verta-v0.5.0-linux-amd64.tar.gz
+curl -LO https://github.com/ostap-mykhaylyak/verta/releases/download/v0.6.0/verta-v0.6.0-linux-amd64.tar.gz
 tar xzf verta-*.tar.gz && cd verta-*
 sudo ./verta --init
 sudo systemctl daemon-reload
@@ -85,7 +86,7 @@ systemd unit. It never overwrites an existing configuration, so
 **running it again from a newer bundle is the upgrade path**:
 
 ```sh
-tar xzf verta-v0.5.0-linux-amd64.tar.gz && cd verta-v0.5.0-linux-amd64
+tar xzf verta-v0.6.0-linux-amd64.tar.gz && cd verta-v0.6.0-linux-amd64
 sudo ./verta --init            # replaces the binary, keeps your config
 sudo systemctl restart verta
 ```
@@ -369,6 +370,42 @@ studenti.scuola.it.  IN TXT "v=spf1 ip4:203.0.113.10 -all"
 DKIM-signed mail forwards with its signature intact (verta never alters
 the body); unsigned mail from a strict-DMARC sender may still be filtered
 downstream — a limitation of any forwarder, not of verta.
+
+---
+
+## Disk quotas
+
+A disk limit can be set on a **whole domain** — all its mailboxes share
+the space — and on a **single mailbox**. Both are enforced together: a
+message is accepted only if it fits the mailbox's own quota *and* the
+domain's shared allowance.
+
+```yaml
+# /etc/verta/domains/example.com.yaml
+name: example.com
+quota: 10G                       # all mailboxes together share 10 GB
+
+users:
+  - email: admin@example.com
+    maildir: /var/mail/example.com/admin
+    quota: 2G                    # this mailbox: at most 2 GB
+  - email: info@example.com
+    maildir: /var/mail/example.com/info
+    # no quota: limited only by the domain's shared 10 GB
+```
+
+Sizes are binary (`1G` = 1024 MB); `500M`, `2000M`, `10G`, or a plain
+byte count all work. An empty or absent quota is unlimited.
+
+When a message would overflow either limit it is **deferred with
+`452 4.2.2 over quota`, never dropped**: the sending server keeps
+retrying and only bounces on its own timeout, so mail is never silently
+lost while a mailbox is full. Usage is measured from the Maildir on disk
+(all folders) and cached briefly, so an expunge frees space within about
+a minute.
+
+Quotas are read live from the domain files, so `verta reload` applies a
+new limit without a restart.
 
 ---
 
@@ -999,7 +1036,7 @@ Rotation is delegated to logrotate; `SIGHUP` reopens the files.
 `verta --status` asks the running daemon what it is doing:
 
 ```
-verta v0.5.0  mail.example.com
+verta v0.6.0  mail.example.com
   pid 2841, up 6d3h12m
 
 Listeners

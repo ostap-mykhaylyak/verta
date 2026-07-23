@@ -143,3 +143,44 @@ users:
 		t.Errorf("mailbox interval rate = %v, want ~0.5/s", r.Limit.Rate)
 	}
 }
+
+// Domain and mailbox quotas parse to bytes; the helpers resolve limits
+// and the domain's mailbox list; a bad quota warns rather than failing.
+func TestQuotaConfig(t *testing.T) {
+	dom := `name: clientea.com
+quota: 10G
+users:
+  - email: a@clientea.com
+    maildir: /var/mail/a
+    quota: 2G
+  - email: b@clientea.com
+    maildir: /var/mail/b
+    quota: nonsense
+`
+	cfg, err := Load(write(t, minimal, map[string]string{"clientea.com": dom}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.DomainQuota("clientea.com"); got != 10<<30 {
+		t.Errorf("domain quota = %d, want %d", got, int64(10)<<30)
+	}
+	if got := cfg.UserQuota("a@clientea.com"); got != 2<<30 {
+		t.Errorf("mailbox a quota = %d, want %d", got, int64(2)<<30)
+	}
+	if got := cfg.UserQuota("b@clientea.com"); got != 0 {
+		t.Errorf("malformed mailbox quota must be 0 (unlimited), got %d", got)
+	}
+	dirs := cfg.DomainMaildirs("clientea.com")
+	if len(dirs) != 2 {
+		t.Errorf("domain maildirs = %v, want 2", dirs)
+	}
+	found := false
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "nonsense") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("a malformed quota must warn: %v", cfg.Warnings)
+	}
+}

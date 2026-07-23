@@ -105,6 +105,10 @@ type Backend struct {
 	// "Spam" = the junk folder) with optional initial flags. from is the
 	// envelope sender (Return-Path).
 	Store func(mb storage.Mailbox, from, folder string, seen, flagged bool, msg []byte) error
+	// Quota reports whether a message of size bytes still fits in the
+	// mailbox and its domain's shared allowance. nil disables quotas.
+	// A false result defers the message (452), never a silent drop.
+	Quota func(mb storage.Mailbox, size int64) (ok bool, reason string)
 	// Forward relays a copy to a remote address. forwardDomain is the
 	// local domain doing the forwarding, used to rewrite the envelope
 	// sender with SRS so the forward passes SPF at the destination.

@@ -563,6 +563,7 @@ func (s *session) cmdData() (quit bool) {
 	}
 
 	accepted := 0
+	overQuota := false
 	for _, r := range s.rcpts {
 		var err error
 		if r.remote {
@@ -571,16 +572,26 @@ func (s *session) cmdData() (quit bool) {
 			err = s.deliverPlan(r, spam, msg)
 		}
 		if err != nil {
-			s.srv.log.Error("delivery failed",
-				"event", "delivery_error", "protocol", "smtp", "ip", s.ip,
-				"rcpt", r.addr, "error", err.Error())
+			if errors.Is(err, errOverQuota) {
+				overQuota = true // already logged in deliverPlan
+			} else {
+				s.srv.log.Error("delivery failed",
+					"event", "delivery_error", "protocol", "smtp", "ip", s.ip,
+					"rcpt", r.addr, "error", err.Error())
+			}
 			continue
 		}
 		accepted++
 	}
 	if accepted == 0 {
 		s.resetTransaction()
-		s.reply("451 4.3.0 delivery failed, try again later")
+		if overQuota {
+			// Full mailbox: temporary, so the sender retries and only
+			// bounces on its own timeout — mail is never silently lost.
+			s.reply("452 4.2.2 over quota, try again later")
+		} else {
+			s.reply("451 4.3.0 delivery failed, try again later")
+		}
 		return false
 	}
 	event := "message_in"
@@ -608,6 +619,7 @@ func (s *session) cmdData() (quit bool) {
 // on purpose counts as delivered, without a bounce.
 func (s *session) deliverPlan(r rcpt, spam bool, msg []byte) error {
 	delivered := false
+	overQuota := false
 	var firstErr error
 
 	for _, l := range r.plan.Local {
@@ -615,6 +627,17 @@ func (s *session) deliverPlan(r rcpt, spam bool, msg []byte) error {
 		if out.Discard {
 			delivered = true // accepted and intentionally not stored
 			continue
+		}
+		// Disk quota: hold (do not drop) a message that would overflow
+		// the mailbox or its domain's shared allowance.
+		if s.srv.backend.Quota != nil {
+			if ok, reason := s.srv.backend.Quota(l.Mailbox, int64(len(msg))); !ok {
+				overQuota = true
+				s.srv.log.Warn("delivery over quota",
+					"event", "over_quota", "protocol", "smtp", "ip", s.ip,
+					"rcpt", l.Mailbox.Email, "reason", reason, "action", "defer")
+				continue
+			}
 		}
 		folder := out.Folder
 		if spam || out.Junk {
@@ -640,11 +663,21 @@ func (s *session) deliverPlan(r rcpt, spam bool, msg []byte) error {
 		}
 	}
 
-	if !delivered && firstErr != nil {
-		return firstErr
+	if !delivered {
+		if firstErr != nil {
+			return firstErr
+		}
+		if overQuota {
+			return errOverQuota
+		}
 	}
 	return nil
 }
+
+// errOverQuota marks a delivery held only because every local mailbox is
+// over its disk quota, so the transaction answers 452 (retry) rather than
+// a generic failure.
+var errOverQuota = errors.New("recipient over quota")
 
 // forward relays one copy to a remote address, if a Forward hook is
 // wired. forwardDomain is the local domain doing the forwarding (the SRS

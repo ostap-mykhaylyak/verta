@@ -19,6 +19,7 @@ import (
 	"github.com/ostap-mykhaylyak/verta/internal/filter"
 	"github.com/ostap-mykhaylyak/verta/internal/pace"
 	"github.com/ostap-mykhaylyak/verta/internal/paths"
+	"github.com/ostap-mykhaylyak/verta/internal/quota"
 	"github.com/ostap-mykhaylyak/verta/internal/ratelimit"
 	"gopkg.in/yaml.v3"
 )
@@ -385,6 +386,9 @@ type Domain struct {
 	CatchAll Targets `yaml:"-"`
 	// Outbound is the domain's outbound policy (egress IP, rate, pacing).
 	Outbound OutboundPolicy `yaml:"-"`
+	// QuotaBytes is the shared disk limit for all the domain's mailboxes,
+	// in bytes (0 = unlimited). Parsed from the domain file's `quota`.
+	QuotaBytes int64 `yaml:"-"`
 }
 
 // DKIMSelectorFor returns the configured selector of a domain.
@@ -438,6 +442,16 @@ type User struct {
 	// Outbound is this mailbox's outbound policy (egress IP, rate,
 	// pacing), overriding the domain's.
 	Outbound *OutboundPolicy `yaml:"outbound"`
+	// Quota is this mailbox's disk limit ("2G", "500M"; empty =
+	// unlimited). It applies on top of the domain quota.
+	Quota string `yaml:"quota"`
+}
+
+// QuotaBytes parses the mailbox quota, returning 0 (unlimited) when it is
+// empty or malformed (the malformed case is reported as a load warning).
+func (u User) QuotaBytes() int64 {
+	n, _ := quota.ParseSize(u.Quota)
+	return n
 }
 
 // PasswordHashFor returns the stored hash for an address, across

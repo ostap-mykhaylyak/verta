@@ -56,6 +56,7 @@ import (
 	"github.com/ostap-mykhaylyak/verta/internal/pop3"
 	"github.com/ostap-mykhaylyak/verta/internal/proc"
 	"github.com/ostap-mykhaylyak/verta/internal/queue"
+	"github.com/ostap-mykhaylyak/verta/internal/quota"
 	"github.com/ostap-mykhaylyak/verta/internal/ratelimit"
 	"github.com/ostap-mykhaylyak/verta/internal/reputation"
 	"github.com/ostap-mykhaylyak/verta/internal/routing"
@@ -551,6 +552,10 @@ func runDaemon(cfgPath, pidfile, sockPath string) (err error) {
 		}
 	}()
 
+	// Disk quotas: a Manager caches each mailbox's usage so the check does
+	// not re-walk the maildir on every message.
+	qm := quota.New(60 * time.Second)
+
 	backend := smtp.Backend{
 		IsLocalDomain: func(d string) bool { return mgr.Get().HasDomain(d) },
 		Route: func(email string) (routing.Plan, bool) {
@@ -571,8 +576,29 @@ func runDaemon(cfgPath, pidfile, sockPath string) (err error) {
 				flags = flags.Add(maildir.FlagFlagged)
 			}
 			full := append([]byte("Return-Path: <"+from+">\r\n"), msg...)
-			_, err := maildir.DeliverWithFlags(dir, full, flags, mb.UID, mb.GID)
-			return err
+			if _, err := maildir.DeliverWithFlags(dir, full, flags, mb.UID, mb.GID); err != nil {
+				return err
+			}
+			qm.Add(mb.Dir, int64(len(full))) // keep the cached usage current
+			return nil
+		},
+		Quota: func(mb storage.Mailbox, size int64) (bool, string) {
+			cfg := mgr.Get()
+			if q := cfg.UserQuota(mb.Email); q > 0 && qm.Get(mb.Dir)+size > q {
+				return false, "mailbox is full"
+			}
+			if _, dom, ok := storage.Split(mb.Email); ok {
+				if q := cfg.DomainQuota(dom); q > 0 {
+					var total int64
+					for _, d := range cfg.DomainMaildirs(dom) {
+						total += qm.Get(d)
+					}
+					if total+size > q {
+						return false, "domain is full"
+					}
+				}
+			}
+			return true, ""
 		},
 		Forward: func(from, forwardDomain, rcpt string, msg []byte) error {
 			sender := from

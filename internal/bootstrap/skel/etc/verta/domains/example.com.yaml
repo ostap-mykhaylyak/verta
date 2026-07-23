@@ -11,6 +11,12 @@
 
 name: example.com
 
+# Shared disk quota for ALL this domain's mailboxes together ("10G",
+# "2000M"; binary units, empty = unlimited). Each mailbox can also set
+# its own quota below; both are enforced. A message that would overflow
+# is deferred (452, "over quota"), never silently dropped.
+# quota: 10G
+
 # The DKIM key that signs this domain's outgoing mail. Create it with
 #   verta generate-dkim example.com
 # which prints the DNS TXT record to publish. A domain without a key
@@ -44,6 +50,10 @@ users:
   - email: admin@example.com
     maildir: /var/mail/example.com/admin
     # password_hash: "$argon2id$v=19$m=65536,t=3,p=4$..."
+
+    # This mailbox's own disk quota ("2G", "500M"; empty = unlimited).
+    # It applies on top of the domain quota above.
+    # quota: 2G
 
     # Forward a copy of every message to another address. A local copy is
     # kept by default; set keep_local: false to forward only. External

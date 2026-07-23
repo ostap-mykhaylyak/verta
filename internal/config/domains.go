@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/ostap-mykhaylyak/verta/internal/quota"
 	"gopkg.in/yaml.v3"
 )
 
@@ -35,6 +36,9 @@ type DomainFile struct {
 	CatchAll Targets `yaml:"catch_all"`
 	// Outbound is this domain's outbound policy (egress IP, rate, pacing).
 	Outbound OutboundPolicy `yaml:"outbound"`
+	// Quota is the shared disk limit for all the domain's mailboxes
+	// ("10G", "2000M"; empty = unlimited).
+	Quota string `yaml:"quota"`
 
 	// path is where the file was read from, for error messages.
 	path string
@@ -84,6 +88,17 @@ func (c *Config) loadDomains(dir string) error {
 		}
 		seen[df.Name] = true
 
+		domainQuota, err := quota.ParseSize(df.Quota)
+		if err != nil {
+			c.warnf("domain %s: invalid quota %q, treated as unlimited", df.Name, df.Quota)
+		}
+		// A malformed mailbox quota must be visible, not silently zero.
+		for _, u := range df.Users {
+			if _, err := quota.ParseSize(u.Quota); err != nil {
+				c.warnf("mailbox %s: invalid quota %q, treated as unlimited", u.Email, u.Quota)
+			}
+		}
+
 		c.Domains = append(c.Domains, Domain{
 			Name:         df.Name,
 			Storage:      df.Storage,
@@ -91,6 +106,7 @@ func (c *Config) loadDomains(dir string) error {
 			Aliases:      normalizeAliases(df.Aliases),
 			CatchAll:     df.CatchAll,
 			Outbound:     df.Outbound,
+			QuotaBytes:   domainQuota,
 		})
 		c.Users = append(c.Users, df.Users...)
 	}
